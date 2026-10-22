@@ -19,7 +19,7 @@ button, input { color: inherit; font: inherit; }
 button { -webkit-tap-highlight-color: transparent; }
 .stage { position: relative; width: 100%; height: 100%; overflow: hidden; isolation: isolate; background: #030303; }
 #text-scene { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
-.vignette { position: absolute; inset: 0; z-index: 1; pointer-events: none; background: radial-gradient(ellipse at center, transparent 45%, rgba(0, 0, 0, .38) 100%); }
+.vignette { position: absolute; inset: 0; z-index: 1; pointer-events: none; background: radial-gradient(ellipse at center, transparent 45%, rgba(0, 0, 0, .22) 100%); }
 .topbar, .bottombar { position: absolute; left: clamp(20px, 4vw, 58px); right: clamp(20px, 4vw, 58px); z-index: 3; display: flex; align-items: center; justify-content: space-between; }
 .topbar { top: clamp(20px, 4vh, 38px); }
 .wordmark { font-size: 21px; font-weight: 700; letter-spacing: .2em; }
@@ -64,8 +64,8 @@ h1 em { color: rgba(239, 239, 232, .55); font-style: normal; }
   .intro { left: 24px; width: calc(100vw - 48px); top: 47%; }
   h1 { font-size: clamp(50px, 13vw, 76px); }
   .intro p { max-width: 290px; font-size: 12px; }
-  .controls { left: 16px; right: 16px; bottom: 76px; justify-content: space-between; gap: 12px; padding: 12px; }
-  .control { min-width: 0; width: 34%; font-size: 7px; }
+  .controls { left: 16px; right: 16px; bottom: 76px; justify-content: space-between; flex-wrap: wrap; gap: 14px 12px; padding: 12px; }
+  .control { min-width: 0; width: calc(50% - 6px); font-size: 7px; }
   .control span { gap: 5px; }
   .text-button { gap: 5px; font-size: 7px; }
   .bottombar { align-items: flex-end; gap: 12px; font-size: 7px; }

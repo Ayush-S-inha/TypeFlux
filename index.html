@@ -17,7 +17,7 @@
       <section class="intro" id="welcome">
         <div class="eyebrow"><span></span> LIVE TYPOGRAPHIC EXPERIMENT / 001</div>
         <h1>Your world,<br /><em>letter by letter.</em></h1>
-        <p>A live view of your surroundings, rebuilt from characters. Move closer to the light and watch the image emerge from the noise.</p>
+        <p>Your camera feed, drawn with text. Move around and see how the light changes the image.</p>
         <button class="start-button" id="start-camera" type="button">Enter the scene <span aria-hidden="true">↗</span></button>
         <div class="privacy-note">Camera processing stays in this browser.</div>
       </section>
@@ -25,11 +25,12 @@
       <section class="controls" id="controls" aria-label="Render controls" hidden>
         <label class="control"><span>DETAIL <output id="detail-value">MEDIUM</output></span><input id="detail" type="range" min="0" max="2" step="1" value="1" /></label>
         <label class="control"><span>CONTRAST <output id="contrast-value">1.3×</output></span><input id="contrast" type="range" min="0.7" max="2.2" step="0.1" value="1.3" /></label>
+        <label class="control"><span>STRUCTURE <output id="structure-value">55%</output></span><input id="structure" type="range" min="0" max="1" step="0.05" value="0.55" /></label>
         <button class="text-button" id="invert" type="button" aria-pressed="false">INVERT <span>OFF</span></button>
         <button class="text-button" id="colorize" type="button" aria-pressed="true">COLOR <span>ON</span></button>
       </section>
       <footer class="bottombar">
-        <div class="render-status"><span id="render-state">AWAITING CAMERA INPUT</span><span class="slash">/</span><span id="render-mode">CHROMATIC GLYPH RENDER</span></div>
+        <div class="render-status"><span id="render-state">AWAITING CAMERA INPUT</span><span class="slash">/</span><span id="render-mode">COLOR MODE</span></div>
         <div class="actions"><button id="pause-camera" type="button" disabled>HOLD FRAME</button><button id="restart-camera" type="button" disabled>RESTART</button></div>
       </footer>
       <video id="camera" autoplay playsinline muted></video>

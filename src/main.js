@@ -21,6 +21,8 @@ const contrastControl = document.querySelector('#contrast');
 const contrastValue = document.querySelector('#contrast-value');
 const invertButton = document.querySelector('#invert');
 const colorButton = document.querySelector('#colorize');
+const structureControl = document.querySelector('#structure');
+const structureValue = document.querySelector('#structure-value');
 
 const glyphs = '  .\'`^",:;Il!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$';
 const detailPresets = [
@@ -28,16 +30,20 @@ const detailPresets = [
   { cellWidth: 7.5, cellHeight: 11.5, fontSize: 10, label: 'MEDIUM' },
   { cellWidth: 5.4, cellHeight: 8.2, fontSize: 7.4, label: 'HIGH' },
 ];
-// A controlled ultraviolet-to-rose palette keeps the image expressive without
-// defaulting to the usual teal/orange technology look.
+// Violet through rose, with a warm highlight at the top end.
 const colorStops = [
   { at: 0, r: 89, g: 67, b: 157 },
   { at: 0.34, r: 157, g: 75, b: 179 },
   { at: 0.68, r: 231, g: 104, b: 151 },
   { at: 1, r: 255, g: 231, b: 199 },
 ];
+const edgeGlyphs = ['-', '\\', '|', '/'];
 const frameInterval = 1000 / 24;
 const luminanceHistogram = new Uint32Array(256);
+let luminanceData = new Float32Array(0);
+let smoothedLuminance = new Float32Array(0);
+let edgeStrengths = new Float32Array(0);
+let edgeDirections = new Uint8Array(0);
 
 let stream = null;
 let running = false;
@@ -54,6 +60,7 @@ let cellWidth = detailPresets[1].cellWidth;
 let cellHeight = detailPresets[1].cellHeight;
 let fontSize = detailPresets[1].fontSize;
 let contrast = Number(contrastControl.value);
+let structure = Number(structureControl.value);
 let blackPoint = 0;
 let whitePoint = 0.86;
 let toneRangeInitialized = false;
@@ -75,6 +82,13 @@ function resize() {
   rows = Math.max(1, Math.floor(height / cellHeight));
   sampleCanvas.width = columns;
   sampleCanvas.height = rows;
+  const sampleCount = columns * rows;
+  if (luminanceData.length !== sampleCount) {
+    luminanceData = new Float32Array(sampleCount);
+    smoothedLuminance = new Float32Array(sampleCount);
+    edgeStrengths = new Float32Array(sampleCount);
+    edgeDirections = new Uint8Array(sampleCount);
+  }
   context.textBaseline = 'top';
   context.textAlign = 'center';
   context.font = `${fontSize}px "Courier New", monospace`;
@@ -150,10 +164,8 @@ function updateToneRange() {
     luminanceHistogram[Math.round(luminance * 255)] += 1;
   }
 
-  // Ignore a small number of extreme pixels, then stretch the useful range.
-  // This helps both a bright room and a dim room use more of the glyph ramp.
-  // Ignore a few outliers, but avoid stretching a flat, noisy frame to full range.
-  // Widening the endpoints in very dim scenes made sensor noise look like image detail.
+  // Percentile bounds ignore isolated bright and dark pixels.
+  // Keep flat frames from turning tiny differences into visible noise.
   const targetBlack = Math.max(0, percentileFromHistogram(0.055, pixelCount) - 0.006);
   const targetWhite = Math.min(1, percentileFromHistogram(0.985, pixelCount) + 0.006);
 
@@ -168,6 +180,61 @@ function updateToneRange() {
   whitePoint += (targetWhite - whitePoint) * 0.14;
 
   if (whitePoint - blackPoint < 0.12) whitePoint = Math.min(1, blackPoint + 0.12);
+}
+
+// Smooth the sampled tones, then measure nearby edges and their direction.
+function prepareStructureMap(toneRange) {
+  for (let index = 0; index < luminanceData.length; index += 1) {
+    const pixel = index * 4;
+    const luminance = (pixelData[pixel] * 0.2126
+      + pixelData[pixel + 1] * 0.7152
+      + pixelData[pixel + 2] * 0.0722) / 255;
+    luminanceData[index] = clamp((luminance - blackPoint - 0.01) / toneRange);
+  }
+
+  // A quick cross blur takes the edge off isolated pixel noise.
+  for (let row = 0; row < rows; row += 1) {
+    for (let column = 0; column < columns; column += 1) {
+      const index = row * columns + column;
+      const center = luminanceData[index];
+      const left = luminanceData[row * columns + Math.max(0, column - 1)];
+      const right = luminanceData[row * columns + Math.min(columns - 1, column + 1)];
+      const top = luminanceData[Math.max(0, row - 1) * columns + column];
+      const bottom = luminanceData[Math.min(rows - 1, row + 1) * columns + column];
+      smoothedLuminance[index] = (center * 4 + left + right + top + bottom) / 8;
+    }
+  }
+
+  // Sobel gradients give each cell an edge strength and direction.
+  for (let row = 0; row < rows; row += 1) {
+    const topRow = Math.max(0, row - 1) * columns;
+    const middleRow = row * columns;
+    const bottomRow = Math.min(rows - 1, row + 1) * columns;
+
+    for (let column = 0; column < columns; column += 1) {
+      const left = Math.max(0, column - 1);
+      const right = Math.min(columns - 1, column + 1);
+      const topLeft = smoothedLuminance[topRow + left];
+      const top = smoothedLuminance[topRow + column];
+      const topRight = smoothedLuminance[topRow + right];
+      const middleLeft = smoothedLuminance[middleRow + left];
+      const middleRight = smoothedLuminance[middleRow + right];
+      const bottomLeft = smoothedLuminance[bottomRow + left];
+      const bottom = smoothedLuminance[bottomRow + column];
+      const bottomRight = smoothedLuminance[bottomRow + right];
+      const gradientX = -topLeft + topRight
+        - 2 * middleLeft + 2 * middleRight
+        - bottomLeft + bottomRight;
+      const gradientY = -topLeft - 2 * top - topRight
+        + bottomLeft + 2 * bottom + bottomRight;
+      const index = middleRow + column;
+      edgeStrengths[index] = clamp(Math.hypot(gradientX, gradientY) / 4);
+
+      const tangent = Math.atan2(gradientY, gradientX) + Math.PI / 2;
+      const direction = Math.round(tangent / (Math.PI / 4));
+      edgeDirections[index] = ((direction % 4) + 4) % 4;
+    }
+  }
 }
 
 function colorForTone(tone, alpha) {
@@ -195,6 +262,8 @@ function drawFrame(timestamp, force = false) {
   if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !sampleCamera()) return;
   lastFrame = timestamp;
   updateToneRange();
+  const toneRange = Math.max(0.22, whitePoint - blackPoint);
+  prepareStructureMap(toneRange);
 
   const width = window.innerWidth;
   const height = window.innerHeight;
@@ -206,36 +275,39 @@ function drawFrame(timestamp, force = false) {
 
   const left = (width - columns * cellWidth) / 2;
   const top = (height - rows * cellHeight) / 2;
-  let pixel = 0;
   const maxGlyph = glyphs.length - 1;
-  // Keep a minimum mapping range without artificially moving the white point up.
-  // This prevents low-light sensor noise from being expanded into bright characters.
-  const toneRange = Math.max(0.22, whitePoint - blackPoint);
+  const edgeThreshold = 0.22 - structure * 0.15;
+  const edgeGain = 2.5 + structure * 4;
 
   for (let row = 0; row < rows; row += 1) {
     const y = top + row * cellHeight;
     for (let column = 0; column < columns; column += 1) {
-      const red = pixelData[pixel];
-      const green = pixelData[pixel + 1];
-      const blue = pixelData[pixel + 2];
-      pixel += 4;
-
-      const sourceLuminance = (red * 0.2126 + green * 0.7152 + blue * 0.0722) / 255;
-      const exposedTone = clamp((sourceLuminance - blackPoint - 0.01) / toneRange);
-      // A gentle curve keeps shadows dark instead of lifting grain across the frame.
-      const shapedTone = Math.pow(exposedTone, 0.92);
+      const gridIndex = row * columns + column;
+      const baseTone = clamp(
+        luminanceData[gridIndex] * 0.72 + smoothedLuminance[gridIndex] * 0.28,
+      );
+      const shapedTone = Math.pow(baseTone, 0.92);
       const contrastTone = clamp((shapedTone - 0.42) * contrast + 0.42);
       const displayTone = inverted ? 1 - contrastTone : contrastTone;
+      const edgeStrength = structure === 0
+        ? 0
+        : clamp((edgeStrengths[gridIndex] - edgeThreshold) * edgeGain);
+      const isContour = structure > 0 && edgeStrength > 0.42;
 
-      // Suppress near-black camera noise in normal mode. Inversion deliberately
-      // bypasses this gate so the existing invert control keeps its expected behavior.
-      if (!inverted && exposedTone < 0.035) continue;
+      // Keep strong edges, but skip nearly black background noise.
+      if (!inverted && baseTone < 0.035 && !isContour) continue;
 
       const glyphIndex = Math.min(maxGlyph, Math.max(0, Math.round(displayTone * maxGlyph)));
-      const glyph = glyphs[glyphIndex];
+      const glyph = isContour
+        ? edgeGlyphs[edgeDirections[gridIndex]]
+        : glyphs[glyphIndex];
       if (glyph === ' ') continue;
 
-      const alpha = Math.min(0.86, 0.1 + Math.pow(displayTone, 0.92) * 0.7);
+      const tonalAlpha = Math.min(
+        0.72,
+        0.09 + Math.pow(displayTone, 0.92) * 0.58,
+      );
+      const alpha = isContour ? clamp(0.22 + edgeStrength * 0.38, 0.22, 0.65) : tonalAlpha;
       if (colorized) {
         context.fillStyle = colorForTone(displayTone, alpha);
       } else {
@@ -250,7 +322,7 @@ function drawFrame(timestamp, force = false) {
 function updateRenderMode() {
   colorButton.setAttribute('aria-pressed', String(colorized));
   colorButton.querySelector('span').textContent = colorized ? 'ON' : 'OFF';
-  renderMode.textContent = colorized ? 'CHROMATIC GLYPH RENDER' : 'MONOCHROME GLYPH RENDER';
+  renderMode.textContent = colorized ? 'COLOR MODE' : 'MONOCHROME MODE';
 }
 
 function renderLoop(timestamp) {
@@ -345,6 +417,12 @@ contrastControl.addEventListener('input', () => {
   contrast = Number(contrastControl.value);
   contrastValue.value = `${contrast.toFixed(1)}×`;
   contrastValue.textContent = `${contrast.toFixed(1)}×`;
+});
+structureControl.addEventListener('input', () => {
+  structure = Number(structureControl.value);
+  const percentage = `${Math.round(structure * 100)}%`;
+  structureValue.value = percentage;
+  structureValue.textContent = percentage;
 });
 invertButton.addEventListener('click', () => {
   inverted = !inverted;

@@ -3,37 +3,62 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#050505" />
-    <title>TypeFlux</title>
+    <meta name="theme-color" content="#08090d" />
+    <meta name="description" content="A live camera playground for hand-tracked superhero effects." />
+    <title>TypeFlux | Gesture Lab</title>
   </head>
   <body>
-    <main class="stage">
-      <canvas id="text-scene" aria-label="Live camera image rendered as text"></canvas>
-      <div class="vignette" aria-hidden="true"></div>
+    <main class="stage" id="stage">
+      <video id="camera" autoplay playsinline muted aria-label="Live camera preview"></video>
+      <canvas id="effects-canvas" aria-hidden="true"></canvas>
+      <div class="screen-shade" aria-hidden="true"></div>
+
       <header class="topbar">
-        <div class="wordmark">TYPEFLUX<span>.</span></div>
-        <div class="live-state"><span class="status-light" id="state-dot"></span><span id="state-label">CAMERA NOT CONNECTED</span></div>
+        <a class="brand" href="#" aria-label="TypeFlux home">TYPEFLUX<span> / GESTURE LAB</span></a>
+        <div class="camera-status" aria-live="polite">
+          <span class="status-dot" id="status-dot"></span>
+          <span id="status-label">CAMERA OFF</span>
+        </div>
       </header>
-      <section class="intro" id="welcome">
-        <div class="eyebrow"><span></span> LIVE TYPOGRAPHIC EXPERIMENT / 001</div>
-        <h1>Your world,<br /><em>letter by letter.</em></h1>
-        <p>Your camera feed, drawn with text. Move around and see how the light changes the image.</p>
-        <button class="start-button" id="start-camera" type="button">Enter the scene <span aria-hidden="true">↗</span></button>
-        <div class="privacy-note">Camera processing stays in this browser.</div>
+
+      <section class="welcome" id="welcome">
+        <p class="eyebrow"><span></span> LIVE CAMERA / REAL-TIME TRACKING</p>
+        <h1>Your hands.<br /><em>Your own effects.</em></h1>
+        <p class="welcome-copy">Move, pose, and trigger effects with your hands. The camera stays live while TypeFlux tracks your gestures in the browser.</p>
+        <button class="primary-button" id="start-camera" type="button">
+          Start camera <span aria-hidden="true">↗</span>
+        </button>
+        <p class="privacy-note">Video is processed on this device. Tracking assets load from the web.</p>
       </section>
-      <div class="error-message" id="error-message" role="status" hidden></div>
-      <section class="controls" id="controls" aria-label="Render controls" hidden>
-        <label class="control"><span>DETAIL <output id="detail-value">MEDIUM</output></span><input id="detail" type="range" min="0" max="2" step="1" value="1" /></label>
-        <label class="control"><span>CONTRAST <output id="contrast-value">1.3×</output></span><input id="contrast" type="range" min="0.7" max="2.2" step="0.1" value="1.3" /></label>
-        <label class="control"><span>STRUCTURE <output id="structure-value">55%</output></span><input id="structure" type="range" min="0" max="1" step="0.05" value="0.55" /></label>
-        <button class="text-button" id="invert" type="button" aria-pressed="false">INVERT <span>OFF</span></button>
-        <button class="text-button" id="colorize" type="button" aria-pressed="true">COLOR <span>ON</span></button>
+
+      <div class="message" id="message" role="status" hidden></div>
+
+      <section class="gesture-readout" id="gesture-readout" aria-live="polite" hidden>
+        <span class="readout-kicker">GESTURE DETECTED</span>
+        <strong id="gesture-name">LOOKING FOR HANDS</strong>
+        <span id="gesture-detail">Raise a hand into view</span>
       </section>
-      <footer class="bottombar">
-        <div class="render-status"><span id="render-state">AWAITING CAMERA INPUT</span><span class="slash">/</span><span id="render-mode">COLOR MODE</span></div>
-        <div class="actions"><button id="pause-camera" type="button" disabled>HOLD FRAME</button><button id="restart-camera" type="button" disabled>RESTART</button></div>
+
+      <aside class="gesture-guide" id="gesture-guide" hidden aria-label="Available gestures">
+        <span>WEB SHOOTER</span>
+        <span>OPEN PALM</span>
+        <span>FIST</span>
+        <span>PEACE SIGN</span>
+        <span>WAVE</span>
+      </aside>
+
+      <footer class="bottom-bar">
+        <div class="engine-state">
+          <span id="engine-label">WAITING FOR CAMERA</span>
+          <span class="separator">/</span>
+          <span id="tracking-label">TRACKING OFF</span>
+        </div>
+        <div class="actions">
+          <button id="effects-toggle" type="button" aria-pressed="true" disabled>EFFECTS <span>ON</span></button>
+          <button id="pause-camera" type="button" disabled>PAUSE</button>
+          <button id="restart-camera" type="button" disabled>RESTART</button>
+        </div>
       </footer>
-      <video id="camera" autoplay playsinline muted></video>
     </main>
     <script type="module" src="/src/main.js"></script>
   </body>

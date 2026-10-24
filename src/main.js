@@ -1,344 +1,139 @@
 import './style.css';
 
-const canvas = document.querySelector('#text-scene');
-const context = canvas.getContext('2d', { alpha: false });
-const sampleCanvas = document.createElement('canvas');
-const sampleContext = sampleCanvas.getContext('2d', { willReadFrequently: true });
 const video = document.querySelector('#camera');
+const canvas = document.querySelector('#effects-canvas');
+const ctx = canvas.getContext('2d');
 const startButton = document.querySelector('#start-camera');
 const pauseButton = document.querySelector('#pause-camera');
 const restartButton = document.querySelector('#restart-camera');
+const effectsButton = document.querySelector('#effects-toggle');
 const welcome = document.querySelector('#welcome');
-const controls = document.querySelector('#controls');
-const stateLabel = document.querySelector('#state-label');
-const stateDot = document.querySelector('#state-dot');
-const renderState = document.querySelector('#render-state');
-const renderMode = document.querySelector('#render-mode');
-const errorMessage = document.querySelector('#error-message');
-const detailControl = document.querySelector('#detail');
-const detailValue = document.querySelector('#detail-value');
-const contrastControl = document.querySelector('#contrast');
-const contrastValue = document.querySelector('#contrast-value');
-const invertButton = document.querySelector('#invert');
-const colorButton = document.querySelector('#colorize');
-const structureControl = document.querySelector('#structure');
-const structureValue = document.querySelector('#structure-value');
+const statusDot = document.querySelector('#status-dot');
+const statusLabel = document.querySelector('#status-label');
+const engineLabel = document.querySelector('#engine-label');
+const trackingLabel = document.querySelector('#tracking-label');
+const gestureReadout = document.querySelector('#gesture-readout');
+const gestureName = document.querySelector('#gesture-name');
+const gestureDetail = document.querySelector('#gesture-detail');
+const gestureGuide = document.querySelector('#gesture-guide');
+const message = document.querySelector('#message');
 
-const glyphs = '  .\'`^",:;Il!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$';
-const detailPresets = [
-  { cellWidth: 10, cellHeight: 15, fontSize: 12, label: 'LOW' },
-  { cellWidth: 7.5, cellHeight: 11.5, fontSize: 10, label: 'MEDIUM' },
-  { cellWidth: 5.4, cellHeight: 8.2, fontSize: 7.4, label: 'HIGH' },
+const TRACKING_MODULE = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.1.1/vision_bundle.mjs';
+const TRACKING_WASM = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.1.1/wasm';
+const HAND_MODEL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
+const FRAME_INTERVAL = 1000 / 24;
+const HAND_CONNECTIONS = [
+  [0, 1], [1, 2], [2, 3], [3, 4],
+  [0, 5], [5, 6], [6, 7], [7, 8],
+  [5, 9], [9, 10], [10, 11], [11, 12],
+  [9, 13], [13, 14], [14, 15], [15, 16],
+  [13, 17], [17, 18], [18, 19], [19, 20], [0, 17],
 ];
-// Violet through rose, with a warm highlight at the top end.
-const colorStops = [
-  { at: 0, r: 89, g: 67, b: 157 },
-  { at: 0.34, r: 157, g: 75, b: 179 },
-  { at: 0.68, r: 231, g: 104, b: 151 },
-  { at: 1, r: 255, g: 231, b: 199 },
-];
-const edgeGlyphs = ['-', '\\', '|', '/'];
-const frameInterval = 1000 / 24;
-const luminanceHistogram = new Uint32Array(256);
-let luminanceData = new Float32Array(0);
-let smoothedLuminance = new Float32Array(0);
-let edgeStrengths = new Float32Array(0);
-let edgeDirections = new Uint8Array(0);
 
 let stream = null;
+let landmarker = null;
 let running = false;
 let paused = false;
-let inverted = false;
-let colorized = true;
-let lastFrame = 0;
-let columns = 0;
-let rows = 0;
-let pixelData = null;
+let effectsEnabled = true;
+let trackerLoading = false;
+let lastVideoTime = -1;
+let lastDetectionAt = 0;
 let animationFrame = 0;
-let dpr = 1;
-let cellWidth = detailPresets[1].cellWidth;
-let cellHeight = detailPresets[1].cellHeight;
-let fontSize = detailPresets[1].fontSize;
-let contrast = Number(contrastControl.value);
-let structure = Number(structureControl.value);
-let blackPoint = 0;
-let whitePoint = 0.86;
-let toneRangeInitialized = false;
+let screenWidth = window.innerWidth;
+let screenHeight = window.innerHeight;
+let pixelRatio = 1;
+let hands = [];
+const effects = [];
+const handHistory = new Map();
+const lastGestures = new Map();
+const lastActionAt = new Map();
 
-function clamp(value, min = 0, max = 1) {
-  return Math.min(max, Math.max(min, value));
+function resizeCanvas() {
+  screenWidth = window.innerWidth;
+  screenHeight = window.innerHeight;
+  pixelRatio = Math.min(window.devicePixelRatio || 1, 1.75);
+  canvas.width = Math.round(screenWidth * pixelRatio);
+  canvas.height = Math.round(screenHeight * pixelRatio);
+  canvas.style.width = `${screenWidth}px`;
+  canvas.style.height = `${screenHeight}px`;
+  ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
 }
 
-function resize() {
-  dpr = Math.min(window.devicePixelRatio || 1, 1.5);
-  const width = window.innerWidth;
-  const height = window.innerHeight;
-  canvas.width = Math.floor(width * dpr);
-  canvas.height = Math.floor(height * dpr);
-  canvas.style.width = `${width}px`;
-  canvas.style.height = `${height}px`;
-  context.setTransform(dpr, 0, 0, dpr, 0, 0);
-  columns = Math.max(1, Math.floor(width / cellWidth));
-  rows = Math.max(1, Math.floor(height / cellHeight));
-  sampleCanvas.width = columns;
-  sampleCanvas.height = rows;
-  const sampleCount = columns * rows;
-  if (luminanceData.length !== sampleCount) {
-    luminanceData = new Float32Array(sampleCount);
-    smoothedLuminance = new Float32Array(sampleCount);
-    edgeStrengths = new Float32Array(sampleCount);
-    edgeDirections = new Uint8Array(sampleCount);
+function setStatus(label, isLive = false) {
+  statusLabel.textContent = label;
+  statusDot.classList.toggle('live', isLive);
+}
+
+function showMessage(text) {
+  message.textContent = text;
+  message.hidden = false;
+}
+
+function hideMessage() {
+  message.hidden = true;
+  message.textContent = '';
+}
+
+async function createHandTracker() {
+  const { FilesetResolver, HandLandmarker } = await import(/* @vite-ignore */ TRACKING_MODULE);
+  const vision = await FilesetResolver.forVisionTasks(TRACKING_WASM);
+  const options = {
+    runningMode: 'VIDEO',
+    numHands: 2,
+    minHandDetectionConfidence: 0.55,
+    minHandPresenceConfidence: 0.55,
+    minTrackingConfidence: 0.5,
+  };
+
+  try {
+    return await HandLandmarker.createFromOptions(vision, {
+      ...options,
+      baseOptions: { modelAssetPath: HAND_MODEL, delegate: 'GPU' },
+    });
+  } catch {
+    return HandLandmarker.createFromOptions(vision, {
+      ...options,
+      baseOptions: { modelAssetPath: HAND_MODEL, delegate: 'CPU' },
+    });
   }
-  context.textBaseline = 'top';
-  context.textAlign = 'center';
-  context.font = `${fontSize}px "Courier New", monospace`;
-  if (running && !paused) drawFrame(performance.now(), true);
-  else drawWaitingState();
 }
 
-function drawWaitingState() {
-  context.fillStyle = '#050505';
-  context.fillRect(0, 0, window.innerWidth, window.innerHeight);
-}
-
-function updateDetail() {
-  const preset = detailPresets[Number(detailControl.value)];
-  cellWidth = preset.cellWidth;
-  cellHeight = preset.cellHeight;
-  fontSize = preset.fontSize;
-  detailValue.value = preset.label;
-  detailValue.textContent = preset.label;
-  resize();
-}
-
-function sampleCamera() {
-  const videoWidth = video.videoWidth;
-  const videoHeight = video.videoHeight;
-  if (!videoWidth || !videoHeight) return false;
-
-  sampleContext.fillStyle = '#000';
-  sampleContext.fillRect(0, 0, columns, rows);
-
-  const targetAspect = (columns * cellWidth) / Math.max(1, rows * cellHeight);
-  const sourceAspect = videoWidth / videoHeight;
-  let sx = 0;
-  let sy = 0;
-  let sw = videoWidth;
-  let sh = videoHeight;
-
-  if (sourceAspect > targetAspect) {
-    sw = videoHeight * targetAspect;
-    sx = (videoWidth - sw) / 2;
-  } else {
-    sh = videoWidth / targetAspect;
-    sy = (videoHeight - sh) / 2;
-  }
-
-  sampleContext.save();
-  sampleContext.translate(columns, 0);
-  sampleContext.scale(-1, 1);
-  sampleContext.drawImage(video, sx, sy, sw, sh, 0, 0, columns, rows);
-  sampleContext.restore();
-  pixelData = sampleContext.getImageData(0, 0, columns, rows).data;
-  return true;
-}
-
-function percentileFromHistogram(percentile, sampleCount) {
-  const threshold = sampleCount * percentile;
-  let cumulative = 0;
-  for (let index = 0; index < luminanceHistogram.length; index += 1) {
-    cumulative += luminanceHistogram[index];
-    if (cumulative >= threshold) return index / 255;
-  }
-  return 1;
-}
-
-function updateToneRange() {
-  luminanceHistogram.fill(0);
-  const pixelCount = pixelData.length / 4;
-
-  for (let pixel = 0; pixel < pixelData.length; pixel += 4) {
-    const luminance = (pixelData[pixel] * 0.2126
-      + pixelData[pixel + 1] * 0.7152
-      + pixelData[pixel + 2] * 0.0722) / 255;
-    luminanceHistogram[Math.round(luminance * 255)] += 1;
-  }
-
-  // Percentile bounds ignore isolated bright and dark pixels.
-  // Keep flat frames from turning tiny differences into visible noise.
-  const targetBlack = Math.max(0, percentileFromHistogram(0.055, pixelCount) - 0.006);
-  const targetWhite = Math.min(1, percentileFromHistogram(0.985, pixelCount) + 0.006);
-
-  if (!toneRangeInitialized) {
-    blackPoint = targetBlack;
-    whitePoint = targetWhite;
-    toneRangeInitialized = true;
+async function loadHandTracking() {
+  if (landmarker) {
+    trackingLabel.textContent = 'TRACKING READY';
     return;
   }
+  if (trackerLoading) return;
+  trackerLoading = true;
+  trackingLabel.textContent = 'LOADING TRACKING';
+  gestureName.textContent = 'LOADING GESTURE ENGINE';
+  gestureDetail.textContent = 'First launch needs an internet connection';
 
-  blackPoint += (targetBlack - blackPoint) * 0.14;
-  whitePoint += (targetWhite - whitePoint) * 0.14;
-
-  if (whitePoint - blackPoint < 0.12) whitePoint = Math.min(1, blackPoint + 0.12);
-}
-
-// Smooth the sampled tones, then measure nearby edges and their direction.
-function prepareStructureMap(toneRange) {
-  for (let index = 0; index < luminanceData.length; index += 1) {
-    const pixel = index * 4;
-    const luminance = (pixelData[pixel] * 0.2126
-      + pixelData[pixel + 1] * 0.7152
-      + pixelData[pixel + 2] * 0.0722) / 255;
-    luminanceData[index] = clamp((luminance - blackPoint - 0.01) / toneRange);
+  try {
+    landmarker = await createHandTracker();
+    if (!running) return;
+    trackingLabel.textContent = 'TRACKING READY';
+    gestureName.textContent = 'SHOW A HAND';
+    gestureDetail.textContent = 'Try a web-shooting pose, open palm, fist, or peace sign';
+  } catch (error) {
+    console.error('TypeFlux could not start hand tracking:', error);
+    trackingLabel.textContent = 'TRACKING UNAVAILABLE';
+    gestureName.textContent = 'CAMERA IS READY';
+    gestureDetail.textContent = 'Hand tracking could not load. Check your connection and restart.';
+    showMessage('The camera is running, but the hand-tracking model could not load. Check your internet connection and choose Restart.');
+  } finally {
+    trackerLoading = false;
   }
-
-  // A quick cross blur takes the edge off isolated pixel noise.
-  for (let row = 0; row < rows; row += 1) {
-    for (let column = 0; column < columns; column += 1) {
-      const index = row * columns + column;
-      const center = luminanceData[index];
-      const left = luminanceData[row * columns + Math.max(0, column - 1)];
-      const right = luminanceData[row * columns + Math.min(columns - 1, column + 1)];
-      const top = luminanceData[Math.max(0, row - 1) * columns + column];
-      const bottom = luminanceData[Math.min(rows - 1, row + 1) * columns + column];
-      smoothedLuminance[index] = (center * 4 + left + right + top + bottom) / 8;
-    }
-  }
-
-  // Sobel gradients give each cell an edge strength and direction.
-  for (let row = 0; row < rows; row += 1) {
-    const topRow = Math.max(0, row - 1) * columns;
-    const middleRow = row * columns;
-    const bottomRow = Math.min(rows - 1, row + 1) * columns;
-
-    for (let column = 0; column < columns; column += 1) {
-      const left = Math.max(0, column - 1);
-      const right = Math.min(columns - 1, column + 1);
-      const topLeft = smoothedLuminance[topRow + left];
-      const top = smoothedLuminance[topRow + column];
-      const topRight = smoothedLuminance[topRow + right];
-      const middleLeft = smoothedLuminance[middleRow + left];
-      const middleRight = smoothedLuminance[middleRow + right];
-      const bottomLeft = smoothedLuminance[bottomRow + left];
-      const bottom = smoothedLuminance[bottomRow + column];
-      const bottomRight = smoothedLuminance[bottomRow + right];
-      const gradientX = -topLeft + topRight
-        - 2 * middleLeft + 2 * middleRight
-        - bottomLeft + bottomRight;
-      const gradientY = -topLeft - 2 * top - topRight
-        + bottomLeft + 2 * bottom + bottomRight;
-      const index = middleRow + column;
-      edgeStrengths[index] = clamp(Math.hypot(gradientX, gradientY) / 4);
-
-      const tangent = Math.atan2(gradientY, gradientX) + Math.PI / 2;
-      const direction = Math.round(tangent / (Math.PI / 4));
-      edgeDirections[index] = ((direction % 4) + 4) % 4;
-    }
-  }
-}
-
-function colorForTone(tone, alpha) {
-  let lower = colorStops[0];
-  let upper = colorStops[colorStops.length - 1];
-
-  for (let index = 0; index < colorStops.length - 1; index += 1) {
-    if (tone >= colorStops[index].at && tone <= colorStops[index + 1].at) {
-      lower = colorStops[index];
-      upper = colorStops[index + 1];
-      break;
-    }
-  }
-
-  const amount = clamp((tone - lower.at) / Math.max(0.001, upper.at - lower.at));
-  const red = Math.round(lower.r + (upper.r - lower.r) * amount);
-  const green = Math.round(lower.g + (upper.g - lower.g) * amount);
-  const blue = Math.round(lower.b + (upper.b - lower.b) * amount);
-  return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
-}
-
-function drawFrame(timestamp, force = false) {
-  if (!running || paused) return;
-  if (!force && timestamp - lastFrame < frameInterval) return;
-  if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !sampleCamera()) return;
-  lastFrame = timestamp;
-  updateToneRange();
-  const toneRange = Math.max(0.22, whitePoint - blackPoint);
-  prepareStructureMap(toneRange);
-
-  const width = window.innerWidth;
-  const height = window.innerHeight;
-  context.fillStyle = '#030303';
-  context.fillRect(0, 0, width, height);
-  context.font = `${fontSize}px "Courier New", monospace`;
-  context.textBaseline = 'top';
-  context.textAlign = 'center';
-
-  const left = (width - columns * cellWidth) / 2;
-  const top = (height - rows * cellHeight) / 2;
-  const maxGlyph = glyphs.length - 1;
-  const edgeThreshold = 0.22 - structure * 0.15;
-  const edgeGain = 2.5 + structure * 4;
-
-  for (let row = 0; row < rows; row += 1) {
-    const y = top + row * cellHeight;
-    for (let column = 0; column < columns; column += 1) {
-      const gridIndex = row * columns + column;
-      const baseTone = clamp(
-        luminanceData[gridIndex] * 0.72 + smoothedLuminance[gridIndex] * 0.28,
-      );
-      const shapedTone = Math.pow(baseTone, 0.92);
-      const contrastTone = clamp((shapedTone - 0.42) * contrast + 0.42);
-      const displayTone = inverted ? 1 - contrastTone : contrastTone;
-      const edgeStrength = structure === 0
-        ? 0
-        : clamp((edgeStrengths[gridIndex] - edgeThreshold) * edgeGain);
-      const isContour = structure > 0 && edgeStrength > 0.42;
-
-      // Keep strong edges, but skip nearly black background noise.
-      if (!inverted && baseTone < 0.035 && !isContour) continue;
-
-      const glyphIndex = Math.min(maxGlyph, Math.max(0, Math.round(displayTone * maxGlyph)));
-      const glyph = isContour
-        ? edgeGlyphs[edgeDirections[gridIndex]]
-        : glyphs[glyphIndex];
-      if (glyph === ' ') continue;
-
-      const tonalAlpha = Math.min(
-        0.72,
-        0.09 + Math.pow(displayTone, 0.92) * 0.58,
-      );
-      const alpha = isContour ? clamp(0.22 + edgeStrength * 0.38, 0.22, 0.65) : tonalAlpha;
-      if (colorized) {
-        context.fillStyle = colorForTone(displayTone, alpha);
-      } else {
-        const brightness = Math.round(178 + displayTone * 72);
-        context.fillStyle = `rgba(${brightness}, ${brightness}, ${brightness}, ${alpha})`;
-      }
-      context.fillText(glyph, left + column * cellWidth + cellWidth * 0.5, y);
-    }
-  }
-}
-
-function updateRenderMode() {
-  colorButton.setAttribute('aria-pressed', String(colorized));
-  colorButton.querySelector('span').textContent = colorized ? 'ON' : 'OFF';
-  renderMode.textContent = colorized ? 'COLOR MODE' : 'MONOCHROME MODE';
-}
-
-function renderLoop(timestamp) {
-  if (!running) return;
-  if (!paused) drawFrame(timestamp);
-  animationFrame = requestAnimationFrame(renderLoop);
 }
 
 async function startCamera() {
-  errorMessage.hidden = true;
+  hideMessage();
   startButton.disabled = true;
   startButton.textContent = 'Connecting…';
 
   try {
     if (!navigator.mediaDevices?.getUserMedia) {
-      throw new Error('Camera access is unavailable. Open TypeFlux on localhost in a current browser.');
+      throw new Error('Camera access is not available in this browser. Open TypeFlux on localhost in a current version of Chrome.');
     }
 
     stream = await navigator.mediaDevices.getUserMedia({
@@ -355,25 +150,28 @@ async function startCamera() {
     await video.play();
     running = true;
     paused = false;
-    toneRangeInitialized = false;
+    lastVideoTime = -1;
+    startButton.textContent = 'Start camera';
     welcome.classList.add('dismissed');
-    controls.hidden = false;
-    stateLabel.textContent = 'LIVE / TEXT FIELD';
-    stateDot.classList.add('live');
-    renderState.textContent = 'CAMERA INPUT ACTIVE';
+    gestureReadout.hidden = false;
+    gestureGuide.hidden = false;
     pauseButton.disabled = false;
     restartButton.disabled = false;
-    pauseButton.textContent = 'HOLD FRAME';
-    startButton.textContent = 'Enter the scene';
-    cancelAnimationFrame(animationFrame);
+    effectsButton.disabled = false;
+    pauseButton.textContent = 'PAUSE';
+    setStatus('CAMERA LIVE', true);
+    engineLabel.textContent = 'CAMERA INPUT ACTIVE';
+    trackingLabel.textContent = 'STARTING TRACKING';
+    gestureName.textContent = 'SHOW A HAND';
+    gestureDetail.textContent = 'Keep your hand inside the camera frame';
     animationFrame = requestAnimationFrame(renderLoop);
+    loadHandTracking();
   } catch (error) {
     startButton.disabled = false;
     startButton.textContent = 'Try again';
-    errorMessage.textContent = error.name === 'NotAllowedError'
+    showMessage(error.name === 'NotAllowedError'
       ? 'Camera permission was blocked. Allow camera access in Chrome settings, then try again.'
-      : error.message || 'The camera could not be started.';
-    errorMessage.hidden = false;
+      : error.message || 'The camera could not be started.');
   }
 }
 
@@ -382,60 +180,452 @@ function stopCamera() {
   paused = false;
   cancelAnimationFrame(animationFrame);
   animationFrame = 0;
+
   if (stream) {
     for (const track of stream.getTracks()) track.stop();
     stream = null;
   }
+
+  video.pause();
   video.srcObject = null;
-  stateLabel.textContent = 'CAMERA NOT CONNECTED';
-  stateDot.classList.remove('live');
-  renderState.textContent = 'AWAITING CAMERA INPUT';
-  pauseButton.disabled = true;
-  restartButton.disabled = true;
-  pauseButton.textContent = 'HOLD FRAME';
-  controls.hidden = true;
+  hands = [];
+  effects.length = 0;
+  handHistory.clear();
+  lastGestures.clear();
+  lastActionAt.clear();
+  ctx.clearRect(0, 0, screenWidth, screenHeight);
+  gestureReadout.hidden = true;
+  gestureGuide.hidden = true;
   welcome.classList.remove('dismissed');
   startButton.disabled = false;
-  startButton.textContent = 'Enter the scene';
-  toneRangeInitialized = false;
-  drawWaitingState();
+  startButton.textContent = 'Start camera';
+  pauseButton.disabled = true;
+  restartButton.disabled = true;
+  effectsButton.disabled = true;
+  pauseButton.textContent = 'PAUSE';
+  setStatus('CAMERA OFF');
+  engineLabel.textContent = 'WAITING FOR CAMERA';
+  trackingLabel.textContent = 'TRACKING OFF';
+}
+
+function distance(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function fingerIsUp(landmarks, tipIndex, pipIndex) {
+  const wrist = landmarks[0];
+  const tipDistance = distance(landmarks[tipIndex], wrist);
+  const jointDistance = distance(landmarks[pipIndex], wrist);
+  return tipDistance > jointDistance * 1.12;
+}
+
+function thumbIsOut(landmarks) {
+  const base = landmarks[2];
+  const tipDistance = distance(landmarks[4], base);
+  const jointDistance = distance(landmarks[3], base);
+  return tipDistance > jointDistance * 1.2;
+}
+
+function readFingers(landmarks) {
+  return {
+    thumb: thumbIsOut(landmarks),
+    index: fingerIsUp(landmarks, 8, 6),
+    middle: fingerIsUp(landmarks, 12, 10),
+    ring: fingerIsUp(landmarks, 16, 14),
+    pinky: fingerIsUp(landmarks, 20, 18),
+  };
+}
+
+function isWaving(key, wristX, now) {
+  const history = handHistory.get(key) || [];
+  history.push({ x: wristX, time: now });
+  while (history.length && now - history[0].time > 900) history.shift();
+  handHistory.set(key, history);
+  if (history.length < 7) return false;
+
+  const xs = history.map((point) => point.x);
+  const span = Math.max(...xs) - Math.min(...xs);
+  if (span < 0.13) return false;
+
+  let lastDirection = 0;
+  let turns = 0;
+  for (let index = 1; index < history.length; index += 1) {
+    const movement = history[index].x - history[index - 1].x;
+    if (Math.abs(movement) < 0.012) continue;
+    const direction = Math.sign(movement);
+    if (lastDirection && direction !== lastDirection) turns += 1;
+    lastDirection = direction;
+  }
+  return turns >= 2;
+}
+
+function recognizeGesture(landmarks, key, now, screenPoints) {
+  const fingers = readFingers(landmarks);
+  const { index, middle, ring, pinky, thumb } = fingers;
+  const openPalm = index && middle && ring && pinky;
+
+  if (openPalm && isWaving(key, screenPoints[0].x / screenWidth, now)) return 'WAVE';
+  if (index && pinky && !middle && !ring) return 'WEB SHOOTER';
+  if (openPalm) return 'OPEN PALM';
+  if (index && middle && !ring && !pinky) return 'PEACE SIGN';
+  if (thumb && !index && !middle && !ring && !pinky && landmarks[4].y < landmarks[3].y) return 'THUMBS UP';
+  if (index && !middle && !ring && !pinky) return 'REPULSOR AIM';
+  if (!index && !middle && !ring && !pinky) return 'FIST';
+  return 'HAND TRACKED';
+}
+
+function screenPoint(landmark) {
+  const videoWidth = video.videoWidth || screenWidth;
+  const videoHeight = video.videoHeight || screenHeight;
+  const coverScale = Math.max(screenWidth / videoWidth, screenHeight / videoHeight);
+  const renderWidth = videoWidth * coverScale;
+  const renderHeight = videoHeight * coverScale;
+  const cropX = (renderWidth - screenWidth) / 2;
+  const cropY = (renderHeight - screenHeight) / 2;
+  return {
+    x: (1 - landmark.x) * renderWidth - cropX,
+    y: landmark.y * renderHeight - cropY,
+  };
+}
+
+function addEffect(type, x, y, extra = {}) {
+  effects.push({ type, x, y, start: performance.now(), duration: 900, ...extra });
+  if (effects.length > 36) effects.splice(0, effects.length - 36);
+}
+
+function fireGesture(gesture, landmarks, points, key, now) {
+  if (gesture === 'HAND TRACKED') return;
+
+  const previous = lastGestures.get(key);
+  const lastTime = lastActionAt.get(key) || 0;
+  const repeatDelay = gesture === 'WEB SHOOTER' ? 720 : gesture === 'REPULSOR AIM' ? 650 : 850;
+  const entered = previous !== gesture;
+  if (now - lastTime < 260) return;
+  if (!entered && now - lastTime < repeatDelay) return;
+  lastGestures.set(key, gesture);
+  lastActionAt.set(key, now);
+
+  const wrist = points[0];
+  const palm = points[9];
+  const indexTip = points[8];
+  const middleTip = points[12];
+
+  if (gesture === 'WEB SHOOTER') {
+    const dx = indexTip.x - wrist.x;
+    const dy = indexTip.y - wrist.y;
+    const length = Math.max(1, Math.hypot(dx, dy));
+    addEffect('web', palm.x, palm.y, { vx: dx / length, vy: dy / length, duration: 530 });
+  } else if (gesture === 'OPEN PALM') {
+    addEffect('pulse', palm.x, palm.y, { duration: 860 });
+  } else if (gesture === 'FIST') {
+    addEffect('impact', palm.x, palm.y, { duration: 580 });
+  } else if (gesture === 'PEACE SIGN') {
+    addEffect('twin-rays', (indexTip.x + middleTip.x) / 2, (indexTip.y + middleTip.y) / 2, {
+      points: [indexTip, middleTip], wrist, duration: 620,
+    });
+  } else if (gesture === 'WAVE') {
+    addEffect('wave', palm.x, palm.y, { duration: 780 });
+  } else if (gesture === 'THUMBS UP') {
+    addEffect('power-up', points[4].x, points[4].y, { duration: 1000 });
+  } else if (gesture === 'REPULSOR AIM') {
+    const dx = indexTip.x - points[6].x;
+    const dy = indexTip.y - points[6].y;
+    const length = Math.max(1, Math.hypot(dx, dy));
+    addEffect('repulsor', indexTip.x, indexTip.y, { vx: dx / length, vy: dy / length, duration: 500 });
+  }
+
+}
+
+function updateHands(result, now) {
+  hands = [];
+  const landmarksList = result.landmarks || [];
+  for (let index = 0; index < landmarksList.length; index += 1) {
+    const landmarks = landmarksList[index];
+    const points = landmarks.map(screenPoint);
+    const handedness = result.handednesses?.[index]?.[0]?.categoryName || `HAND ${index + 1}`;
+    const key = String(handedness);
+    const gesture = recognizeGesture(landmarks, key, now, points);
+    hands.push({ key, landmarks, points, gesture });
+    fireGesture(gesture, landmarks, points, key, now);
+  }
+
+  if (!hands.length) {
+    gestureName.textContent = landmarker ? 'SHOW A HAND' : 'LOADING GESTURE ENGINE';
+    gestureDetail.textContent = landmarker ? 'Move your hand into the camera frame' : 'Preparing hand tracking';
+    return;
+  }
+
+  const mainHand = hands[0];
+  gestureName.textContent = mainHand.gesture;
+  gestureDetail.textContent = hands.length > 1 ? `${hands.length} hands in view` : 'Gesture tracking active';
+}
+
+function drawHandGuides() {
+  for (const hand of hands) {
+    const points = hand.points;
+    ctx.save();
+    ctx.lineWidth = 1.15;
+    ctx.strokeStyle = 'rgba(169, 231, 255, 0.35)';
+    ctx.shadowColor = 'rgba(97, 210, 255, 0.28)';
+    ctx.shadowBlur = 5;
+    ctx.beginPath();
+    for (const [from, to] of HAND_CONNECTIONS) {
+      ctx.moveTo(points[from].x, points[from].y);
+      ctx.lineTo(points[to].x, points[to].y);
+    }
+    ctx.stroke();
+
+    for (const landmarkIndex of [0, 4, 8, 12, 16, 20]) {
+      const point = points[landmarkIndex];
+      ctx.beginPath();
+      ctx.fillStyle = landmarkIndex === 8 ? '#fff7d6' : '#a8ecff';
+      ctx.arc(point.x, point.y, landmarkIndex === 0 ? 3 : 2.3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+
+    const labelPoint = points[0];
+    ctx.save();
+    ctx.font = '9px "Courier New", monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'bottom';
+    ctx.fillStyle = 'rgba(245, 243, 250, .9)';
+    ctx.fillText(hand.gesture, Math.min(screenWidth - 150, Math.max(12, labelPoint.x + 12)), Math.max(36, labelPoint.y - 12));
+    ctx.restore();
+  }
+}
+
+function drawWeb(effect, progress) {
+  const distanceOut = Math.max(screenWidth, screenHeight) * 0.95 * progress;
+  const endX = effect.x + effect.vx * distanceOut;
+  const endY = effect.y + effect.vy * distanceOut;
+  const sideX = -effect.vy;
+  const sideY = effect.vx;
+  const segments = Math.max(8, Math.floor(distanceOut / 20));
+
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.shadowColor = 'rgba(190, 238, 255, .9)';
+  ctx.shadowBlur = 13;
+  ctx.strokeStyle = 'rgba(245, 250, 255, .94)';
+  ctx.lineWidth = 2.1;
+  ctx.beginPath();
+  ctx.moveTo(effect.x, effect.y);
+  for (let step = 1; step <= segments; step += 1) {
+    const t = step / segments;
+    const bend = Math.sin(t * Math.PI * 7) * Math.min(12, 3 + distanceOut * 0.012) * t;
+    ctx.lineTo(effect.x + effect.vx * distanceOut * t + sideX * bend,
+      effect.y + effect.vy * distanceOut * t + sideY * bend);
+  }
+  ctx.stroke();
+  ctx.shadowBlur = 4;
+  ctx.strokeStyle = 'rgba(158, 232, 255, .85)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(effect.x, effect.y);
+  ctx.lineTo(endX, endY);
+  ctx.stroke();
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(effect.x, effect.y, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawPulse(effect, progress) {
+  const radius = 24 + progress * Math.min(screenWidth, screenHeight) * 0.24;
+  ctx.save();
+  for (let ring = 0; ring < 3; ring += 1) {
+    const ringProgress = (progress + ring * 0.12) % 1;
+    const ringRadius = 18 + ringProgress * Math.min(screenWidth, screenHeight) * 0.22;
+    ctx.beginPath();
+    ctx.arc(effect.x, effect.y, ringRadius, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(${ring === 1 ? '185, 151, 255' : '160, 236, 255'}, ${(1 - ringProgress) * 0.72})`;
+    ctx.lineWidth = 2 - ring * 0.35;
+    ctx.shadowColor = 'rgba(148, 221, 255, .85)';
+    ctx.shadowBlur = 15;
+    ctx.stroke();
+  }
+  const glow = ctx.createRadialGradient(effect.x, effect.y, 2, effect.x, effect.y, radius * 0.9);
+  glow.addColorStop(0, 'rgba(240, 251, 255, .6)');
+  glow.addColorStop(1, 'rgba(152, 196, 255, 0)');
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(effect.x, effect.y, radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawImpact(effect, progress) {
+  const reach = 26 + progress * 145;
+  const count = 16;
+  ctx.save();
+  ctx.translate(effect.x, effect.y);
+  ctx.rotate(progress * 0.7);
+  ctx.lineCap = 'round';
+  for (let index = 0; index < count; index += 1) {
+    const angle = (Math.PI * 2 * index) / count;
+    const inner = reach * 0.35;
+    const outer = reach * (0.72 + (index % 3) * 0.14);
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(angle) * inner, Math.sin(angle) * inner);
+    ctx.lineTo(Math.cos(angle) * outer, Math.sin(angle) * outer);
+    ctx.strokeStyle = index % 2 ? `rgba(255, 123, 183, ${(1 - progress) * .85})` : `rgba(255, 234, 194, ${(1 - progress) * .95})`;
+    ctx.lineWidth = index % 3 === 0 ? 2.8 : 1.4;
+    ctx.shadowColor = 'rgba(255, 121, 177, .75)';
+    ctx.shadowBlur = 9;
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawTwinRays(effect, progress) {
+  const reach = 70 + progress * 260;
+  const points = effect.points || [];
+  const wrist = effect.wrist || { x: effect.x, y: effect.y + 20 };
+  ctx.save();
+  ctx.lineCap = 'round';
+  points.forEach((point, index) => {
+    const dx = point.x - wrist.x;
+    const dy = point.y - wrist.y;
+    const length = Math.max(1, Math.hypot(dx, dy));
+    const endX = point.x + (dx / length) * reach;
+    const endY = point.y + (dy / length) * reach;
+    ctx.beginPath();
+    ctx.moveTo(point.x, point.y);
+    ctx.lineTo(endX, endY);
+    ctx.strokeStyle = index === 0 ? `rgba(173, 231, 255, ${(1 - progress) * .9})` : `rgba(205, 168, 255, ${(1 - progress) * .9})`;
+    ctx.lineWidth = 5 * (1 - progress) + 1;
+    ctx.shadowColor = 'rgba(167, 220, 255, .9)';
+    ctx.shadowBlur = 15;
+    ctx.stroke();
+  });
+  ctx.restore();
+}
+
+function drawWave(effect, progress) {
+  ctx.save();
+  for (let arc = 0; arc < 3; arc += 1) {
+    const radius = 18 + ((progress + arc * .17) % 1) * 90;
+    ctx.beginPath();
+    ctx.arc(effect.x, effect.y, radius, -Math.PI * 0.85, Math.PI * 0.85);
+    ctx.strokeStyle = `rgba(255, 218, 155, ${(1 - progress) * .78})`;
+    ctx.lineWidth = 2.2 - arc * .4;
+    ctx.shadowColor = 'rgba(255, 185, 110, .85)';
+    ctx.shadowBlur = 12;
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawPowerUp(effect, progress) {
+  const radius = 24 + Math.sin(progress * Math.PI * 5) * 8 + progress * 48;
+  ctx.save();
+  const gradient = ctx.createRadialGradient(effect.x, effect.y, 0, effect.x, effect.y, radius * 1.5);
+  gradient.addColorStop(0, `rgba(255, 246, 205, ${(1 - progress) * .78})`);
+  gradient.addColorStop(1, 'rgba(255, 190, 102, 0)');
+  ctx.fillStyle = gradient;
+  ctx.beginPath();
+  ctx.arc(effect.x, effect.y, radius * 1.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = `rgba(255, 225, 157, ${(1 - progress) * .9})`;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(effect.x, effect.y, radius, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawRepulsor(effect, progress) {
+  const reach = 90 + progress * 380;
+  const endX = effect.x + effect.vx * reach;
+  const endY = effect.y + effect.vy * reach;
+  ctx.save();
+  ctx.lineCap = 'round';
+  const gradient = ctx.createLinearGradient(effect.x, effect.y, endX, endY);
+  gradient.addColorStop(0, `rgba(190, 244, 255, ${(1 - progress) * .95})`);
+  gradient.addColorStop(1, 'rgba(170, 156, 255, 0)');
+  ctx.strokeStyle = gradient;
+  ctx.lineWidth = 7 * (1 - progress) + 1;
+  ctx.shadowColor = 'rgba(135, 223, 255, .9)';
+  ctx.shadowBlur = 15;
+  ctx.beginPath();
+  ctx.moveTo(effect.x, effect.y);
+  ctx.lineTo(endX, endY);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawEffects(now) {
+  ctx.clearRect(0, 0, screenWidth, screenHeight);
+  if (!effectsEnabled) return;
+
+  drawHandGuides();
+  for (let index = effects.length - 1; index >= 0; index -= 1) {
+    const effect = effects[index];
+    const progress = Math.max(0, Math.min(1, (now - effect.start) / effect.duration));
+    if (progress >= 1) {
+      effects.splice(index, 1);
+      continue;
+    }
+
+    if (effect.type === 'web') drawWeb(effect, progress);
+    else if (effect.type === 'pulse') drawPulse(effect, progress);
+    else if (effect.type === 'impact') drawImpact(effect, progress);
+    else if (effect.type === 'twin-rays') drawTwinRays(effect, progress);
+    else if (effect.type === 'wave') drawWave(effect, progress);
+    else if (effect.type === 'power-up') drawPowerUp(effect, progress);
+    else if (effect.type === 'repulsor') drawRepulsor(effect, progress);
+  }
+}
+
+function renderLoop(now) {
+  if (!running) return;
+  if (!paused) {
+    if (landmarker && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+      && video.currentTime !== lastVideoTime && now - lastDetectionAt >= FRAME_INTERVAL) {
+      try {
+        const result = landmarker.detectForVideo(video, now);
+        updateHands(result, now);
+        lastVideoTime = video.currentTime;
+        lastDetectionAt = now;
+      } catch (error) {
+        console.error('Hand tracking frame failed:', error);
+        trackingLabel.textContent = 'TRACKING RETRYING';
+      }
+    }
+    drawEffects(now);
+  }
+  animationFrame = requestAnimationFrame(renderLoop);
 }
 
 startButton.addEventListener('click', startCamera);
-pauseButton.addEventListener('click', () => {
+pauseButton.addEventListener('click', async () => {
   if (!running) return;
   paused = !paused;
-  pauseButton.textContent = paused ? 'RESUME' : 'HOLD FRAME';
-  renderState.textContent = paused ? 'FRAME HELD' : 'CAMERA INPUT ACTIVE';
+  if (paused) {
+    video.pause();
+    pauseButton.textContent = 'RESUME';
+    engineLabel.textContent = 'CAMERA PAUSED';
+  } else {
+    await video.play();
+    pauseButton.textContent = 'PAUSE';
+    engineLabel.textContent = 'CAMERA INPUT ACTIVE';
+    lastVideoTime = -1;
+  }
 });
-restartButton.addEventListener('click', () => {
+restartButton.addEventListener('click', async () => {
   stopCamera();
-  startCamera();
+  await startCamera();
 });
-detailControl.addEventListener('input', updateDetail);
-contrastControl.addEventListener('input', () => {
-  contrast = Number(contrastControl.value);
-  contrastValue.value = `${contrast.toFixed(1)}×`;
-  contrastValue.textContent = `${contrast.toFixed(1)}×`;
+effectsButton.addEventListener('click', () => {
+  effectsEnabled = !effectsEnabled;
+  effectsButton.setAttribute('aria-pressed', String(effectsEnabled));
+  effectsButton.querySelector('span').textContent = effectsEnabled ? 'ON' : 'OFF';
+  if (!effectsEnabled) ctx.clearRect(0, 0, screenWidth, screenHeight);
 });
-structureControl.addEventListener('input', () => {
-  structure = Number(structureControl.value);
-  const percentage = `${Math.round(structure * 100)}%`;
-  structureValue.value = percentage;
-  structureValue.textContent = percentage;
-});
-invertButton.addEventListener('click', () => {
-  inverted = !inverted;
-  invertButton.setAttribute('aria-pressed', String(inverted));
-  invertButton.querySelector('span').textContent = inverted ? 'ON' : 'OFF';
-});
-colorButton.addEventListener('click', () => {
-  colorized = !colorized;
-  updateRenderMode();
-});
-window.addEventListener('resize', resize);
+window.addEventListener('resize', resizeCanvas);
 window.addEventListener('beforeunload', stopCamera);
 
-updateRenderMode();
-resize();
-drawWaitingState();
+resizeCanvas();

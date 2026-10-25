@@ -45,8 +45,9 @@ let pixelRatio = 1;
 let hands = [];
 const effects = [];
 const handHistory = new Map();
-const lastGestures = new Map();
-const lastActionAt = new Map();
+const gestureStates = new Map();
+const GESTURE_HOLD_MS = 150;
+const HAND_LOST_RESET_MS = 450;
 
 function resizeCanvas() {
   screenWidth = window.innerWidth;
@@ -191,8 +192,7 @@ function stopCamera() {
   hands = [];
   effects.length = 0;
   handHistory.clear();
-  lastGestures.clear();
-  lastActionAt.clear();
+  gestureStates.clear();
   ctx.clearRect(0, 0, screenWidth, screenHeight);
   gestureReadout.hidden = true;
   gestureGuide.hidden = true;
@@ -293,17 +293,52 @@ function addEffect(type, x, y, extra = {}) {
   if (effects.length > 36) effects.splice(0, effects.length - 36);
 }
 
-function fireGesture(gesture, landmarks, points, key, now) {
-  if (gesture === 'HAND TRACKED') return;
+function settleGesture(key, detectedGesture, now) {
+  let state = gestureStates.get(key);
+  if (!state) {
+    state = {
+      candidate: detectedGesture,
+      candidateSince: now,
+      active: 'HAND TRACKED',
+      missingSince: null,
+    };
+    gestureStates.set(key, state);
+  }
 
-  const previous = lastGestures.get(key);
-  const lastTime = lastActionAt.get(key) || 0;
-  const repeatDelay = gesture === 'WEB SHOOTER' ? 720 : gesture === 'REPULSOR AIM' ? 650 : 850;
-  const entered = previous !== gesture;
-  if (now - lastTime < 260) return;
-  if (!entered && now - lastTime < repeatDelay) return;
-  lastGestures.set(key, gesture);
-  lastActionAt.set(key, now);
+  state.missingSince = null;
+  if (detectedGesture !== state.candidate) {
+    state.candidate = detectedGesture;
+    state.candidateSince = now;
+  }
+
+  if (now - state.candidateSince < GESTURE_HOLD_MS || state.active === state.candidate) {
+    return { gesture: state.active, entered: false };
+  }
+
+  state.active = state.candidate;
+  return { gesture: state.active, entered: state.active !== 'HAND TRACKED' };
+}
+
+function resetLostHands(seenHands, now) {
+  for (const [key, state] of gestureStates) {
+    if (seenHands.has(key)) {
+      state.missingSince = null;
+      continue;
+    }
+
+    if (state.missingSince === null) state.missingSince = now;
+    if (now - state.missingSince < HAND_LOST_RESET_MS) continue;
+    if (state.active === 'HAND TRACKED' && state.candidate === 'HAND TRACKED') continue;
+
+    state.candidate = 'HAND TRACKED';
+    state.candidateSince = now;
+    state.active = 'HAND TRACKED';
+    handHistory.delete(key);
+  }
+}
+
+function fireGesture(gesture, points) {
+  if (gesture === 'HAND TRACKED') return;
 
   const wrist = points[0];
   const palm = points[9];
@@ -311,10 +346,21 @@ function fireGesture(gesture, landmarks, points, key, now) {
   const middleTip = points[12];
 
   if (gesture === 'WEB SHOOTER') {
-    const dx = indexTip.x - wrist.x;
-    const dy = indexTip.y - wrist.y;
+    // Aim along the index finger, not across the whole hand.
+    const indexBase = points[5];
+    const dx = indexTip.x - indexBase.x;
+    const dy = indexTip.y - indexBase.y;
     const length = Math.max(1, Math.hypot(dx, dy));
-    addEffect('web', palm.x, palm.y, { vx: dx / length, vy: dy / length, duration: 530 });
+    const origin = {
+      x: wrist.x * 0.58 + palm.x * 0.42,
+      y: wrist.y * 0.58 + palm.y * 0.42,
+    };
+    addEffect('web', origin.x, origin.y, {
+      vx: dx / length,
+      vy: dy / length,
+      duration: 820,
+      flightRatio: 0.52,
+    });
   } else if (gesture === 'OPEN PALM') {
     addEffect('pulse', palm.x, palm.y, { duration: 860 });
   } else if (gesture === 'FIST') {
@@ -338,16 +384,23 @@ function fireGesture(gesture, landmarks, points, key, now) {
 
 function updateHands(result, now) {
   hands = [];
+  const seenHands = new Set();
   const landmarksList = result.landmarks || [];
+
   for (let index = 0; index < landmarksList.length; index += 1) {
     const landmarks = landmarksList[index];
     const points = landmarks.map(screenPoint);
     const handedness = result.handednesses?.[index]?.[0]?.categoryName || `HAND ${index + 1}`;
     const key = String(handedness);
-    const gesture = recognizeGesture(landmarks, key, now, points);
-    hands.push({ key, landmarks, points, gesture });
-    fireGesture(gesture, landmarks, points, key, now);
+    const detectedGesture = recognizeGesture(landmarks, key, now, points);
+    const settled = settleGesture(key, detectedGesture, now);
+    seenHands.add(key);
+    hands.push({ key, landmarks, points, gesture: settled.gesture });
+
+    if (settled.entered) fireGesture(settled.gesture, points);
   }
+
+  resetLostHands(seenHands, now);
 
   if (!hands.length) {
     gestureName.textContent = landmarker ? 'SHOW A HAND' : 'LOADING GESTURE ENGINE';
@@ -357,7 +410,13 @@ function updateHands(result, now) {
 
   const mainHand = hands[0];
   gestureName.textContent = mainHand.gesture;
-  gestureDetail.textContent = hands.length > 1 ? `${hands.length} hands in view` : 'Gesture tracking active';
+  if (hands.length > 1) {
+    gestureDetail.textContent = `${hands.length} hands in view`;
+  } else if (mainHand.gesture === 'HAND TRACKED') {
+    gestureDetail.textContent = 'Hold a pose briefly to trigger an effect';
+  } else {
+    gestureDetail.textContent = 'Pose locked. Relax your hand to trigger again';
+  }
 }
 
 function drawHandGuides() {
@@ -395,40 +454,104 @@ function drawHandGuides() {
   }
 }
 
+function distanceToEdge(x, y, vx, vy) {
+  const distances = [];
+  if (vx > 0.0001) distances.push((screenWidth - x) / vx);
+  else if (vx < -0.0001) distances.push(-x / vx);
+  if (vy > 0.0001) distances.push((screenHeight - y) / vy);
+  else if (vy < -0.0001) distances.push(-y / vy);
+
+  const validDistances = distances.filter((distance) => distance >= 0);
+  return validDistances.length
+    ? Math.min(...validDistances)
+    : Math.hypot(screenWidth, screenHeight);
+}
+
 function drawWeb(effect, progress) {
-  const distanceOut = Math.max(screenWidth, screenHeight) * 0.95 * progress;
-  const endX = effect.x + effect.vx * distanceOut;
-  const endY = effect.y + effect.vy * distanceOut;
+  const flightRatio = effect.flightRatio || 0.52;
+  const flight = Math.min(1, progress / flightRatio);
+  const travel = 1 - Math.pow(1 - flight, 3);
+  const fade = progress <= flightRatio
+    ? 1
+    : Math.max(0, 1 - (progress - flightRatio) / (1 - flightRatio));
+  const reach = distanceToEdge(effect.x, effect.y, effect.vx, effect.vy);
+  const length = reach * travel;
+  if (length < 2 || fade <= 0) return;
+
   const sideX = -effect.vy;
   const sideY = effect.vx;
-  const segments = Math.max(8, Math.floor(distanceOut / 20));
+  const segments = Math.max(4, Math.min(72, Math.ceil(length / 12)));
+  const strandPoint = (t) => {
+    const sway = Math.sin(t * Math.PI * 5) * 2.1 * Math.sin(t * Math.PI);
+    return {
+      x: effect.x + effect.vx * length * t + sideX * sway,
+      y: effect.y + effect.vy * length * t + sideY * sway,
+    };
+  };
 
   ctx.save();
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
-  ctx.shadowColor = 'rgba(190, 238, 255, .9)';
-  ctx.shadowBlur = 13;
-  ctx.strokeStyle = 'rgba(245, 250, 255, .94)';
-  ctx.lineWidth = 2.1;
+
+  // Soft outer glow, then two fine strands for a braided silk look.
+  ctx.shadowColor = 'rgba(169, 225, 255, .85)';
+  ctx.shadowBlur = 11;
+  ctx.strokeStyle = `rgba(147, 211, 255, ${0.45 * fade})`;
+  ctx.lineWidth = 4.2;
   ctx.beginPath();
   ctx.moveTo(effect.x, effect.y);
   for (let step = 1; step <= segments; step += 1) {
-    const t = step / segments;
-    const bend = Math.sin(t * Math.PI * 7) * Math.min(12, 3 + distanceOut * 0.012) * t;
-    ctx.lineTo(effect.x + effect.vx * distanceOut * t + sideX * bend,
-      effect.y + effect.vy * distanceOut * t + sideY * bend);
+    const point = strandPoint(step / segments);
+    ctx.lineTo(point.x, point.y);
   }
   ctx.stroke();
-  ctx.shadowBlur = 4;
-  ctx.strokeStyle = 'rgba(158, 232, 255, .85)';
-  ctx.lineWidth = 1;
+
+  ctx.shadowBlur = 3;
+  for (const offset of [-1.1, 1.1]) {
+    ctx.beginPath();
+    for (let step = 0; step <= segments; step += 1) {
+      const t = step / segments;
+      const point = strandPoint(t);
+      const x = point.x + sideX * offset;
+      const y = point.y + sideY * offset;
+      if (step === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.strokeStyle = `rgba(245, 251, 255, ${0.9 * fade})`;
+    ctx.lineWidth = offset < 0 ? 1.25 : 0.8;
+    ctx.stroke();
+  }
+
+  // Tiny silk cross-threads keep the strand from reading as a plain laser.
+  const threadCount = Math.min(24, Math.floor(length / 27));
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = `rgba(195, 235, 255, ${0.72 * fade})`;
+  ctx.lineWidth = 0.75;
+  for (let index = 1; index <= threadCount; index += 1) {
+    const t = index / (threadCount + 1);
+    const point = strandPoint(t);
+    const spread = 2.5 + t * 2.8;
+    const tilt = index % 2 ? 1 : -1;
+    ctx.beginPath();
+    ctx.moveTo(point.x - sideX * spread, point.y - sideY * spread);
+    ctx.lineTo(point.x + sideX * spread + effect.vx * tilt * 2,
+      point.y + sideY * spread + effect.vy * tilt * 2);
+    ctx.stroke();
+  }
+
+  const head = strandPoint(1);
+  ctx.shadowColor = 'rgba(190, 238, 255, .95)';
+  ctx.shadowBlur = 14;
+  ctx.fillStyle = `rgba(255, 255, 255, ${0.95 * fade})`;
   ctx.beginPath();
-  ctx.moveTo(effect.x, effect.y);
-  ctx.lineTo(endX, endY);
-  ctx.stroke();
-  ctx.fillStyle = '#fff';
+  ctx.arc(head.x, head.y, 2.2 + (1 - travel) * 1.8, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Small flash at the shooter end marks where the strand came from.
+  ctx.shadowBlur = 8;
+  ctx.fillStyle = `rgba(227, 248, 255, ${0.8 * fade})`;
   ctx.beginPath();
-  ctx.arc(effect.x, effect.y, 4, 0, Math.PI * 2);
+  ctx.arc(effect.x, effect.y, 2.6, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
 }

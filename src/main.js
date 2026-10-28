@@ -156,7 +156,7 @@ async function loadFaceTracking() {
     faceTrackingFailed = false;
     if (!running) return;
     updateTrackingLabel();
-    gestureDetail.textContent = 'Spider-Man: index + pinky. Iron Man: open palm. Superman: squint both eyes.';
+    gestureDetail.textContent = 'Spider-Man: index + pinky. Iron Man: open palm. Sudarshan Chakra: index only. Superman: squint both eyes.';
   } catch (error) {
     console.error('TypeFlux could not start face tracking:', error);
     faceTrackingFailed = true;
@@ -185,8 +185,8 @@ async function loadHandTracking() {
     updateTrackingLabel();
     gestureName.textContent = 'SHOW A HAND';
     gestureDetail.textContent = faceTrackingFailed
-      ? 'Use Spider-Man or Iron Man hand poses. Superman eye tracking is unavailable.'
-      : 'Spider-Man: index + pinky. Iron Man: open palm. Superman: squint both eyes.';
+      ? 'Use Spider-Man, Iron Man, or the index-only Sudarshan Chakra pose. Superman eye tracking is unavailable.'
+      : 'Spider-Man: index + pinky. Iron Man: open palm. Sudarshan Chakra: index only. Superman: squint both eyes.';
   } catch (error) {
     console.error('TypeFlux could not start hand tracking:', error);
     trackingLabel.textContent = 'HAND TRACKING UNAVAILABLE';
@@ -235,7 +235,7 @@ async function startCamera() {
     engineLabel.textContent = 'CAMERA INPUT ACTIVE';
     trackingLabel.textContent = 'STARTING HAND + EYE TRACKING';
     gestureName.textContent = 'SHOW A HAND OR SQUINT';
-    gestureDetail.textContent = 'Spider-Man: index + pinky. Iron Man: open palm. Superman: squint both eyes.';
+    gestureDetail.textContent = 'Spider-Man: index + pinky. Iron Man: open palm. Sudarshan Chakra: index only. Superman: squint both eyes.';
     eyesSquintedSince = null;
     eyesOpenSince = null;
     eyeLaserArmed = true;
@@ -292,22 +292,32 @@ function distance(a, b) {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
+function landmarkDistance(a, b) {
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  const dz = Number.isFinite(a.z) && Number.isFinite(b.z) ? a.z - b.z : 0;
+  return Math.hypot(dx, dy, dz);
+}
+
 function jointAngle(a, b, c) {
+  const useDepth = [a, b, c].every((point) => Number.isFinite(point.z));
   const bax = a.x - b.x;
   const bay = a.y - b.y;
+  const baz = useDepth ? a.z - b.z : 0;
   const bcx = c.x - b.x;
   const bcy = c.y - b.y;
-  const denominator = Math.hypot(bax, bay) * Math.hypot(bcx, bcy);
+  const bcz = useDepth ? c.z - b.z : 0;
+  const denominator = Math.hypot(bax, bay, baz) * Math.hypot(bcx, bcy, bcz);
   if (!denominator) return 0;
-  const cosine = Math.max(-1, Math.min(1, (bax * bcx + bay * bcy) / denominator));
+  const cosine = Math.max(-1, Math.min(1, (bax * bcx + bay * bcy + baz * bcz) / denominator));
   return Math.acos(cosine) * (180 / Math.PI);
 }
 
 function fingerIsExtended(landmarks, mcpIndex, pipIndex, dipIndex, tipIndex) {
   const pipAngle = jointAngle(landmarks[mcpIndex], landmarks[pipIndex], landmarks[dipIndex]);
   const dipAngle = jointAngle(landmarks[pipIndex], landmarks[dipIndex], landmarks[tipIndex]);
-  const tipBeyondJoint = distance(landmarks[tipIndex], landmarks[pipIndex])
-    > distance(landmarks[dipIndex], landmarks[pipIndex]) * 0.72;
+  const tipBeyondJoint = landmarkDistance(landmarks[tipIndex], landmarks[pipIndex])
+    > landmarkDistance(landmarks[dipIndex], landmarks[pipIndex]) * 0.72;
   return pipAngle > 135 && dipAngle > 135 && tipBeyondJoint;
 }
 
@@ -324,9 +334,10 @@ function recognizeGesture(landmarks) {
   const { index, middle, ring, pinky } = readFingers(landmarks);
   const openPalm = index && middle && ring && pinky;
 
-  // Check the open palm first so it cannot be mistaken for a web-shooting pose.
+  // Check specific poses before falling back to a tracked hand.
   if (openPalm) return 'IRON MAN BLAST';
   if (index && pinky && !middle && !ring) return 'SPIDER-MAN WEB';
+  if (index && !middle && !ring && !pinky) return 'SUDARSHAN CHAKRA';
   return 'HAND TRACKED';
 }
 
@@ -439,6 +450,19 @@ function fireGesture(gesture, points) {
     });
     addEffect('repulsor-flash', palm.x, palm.y, { duration: 260 });
     showPowerStatus('IRON MAN REPULSOR', 'Blast fired. Return to a relaxed hand before firing again.');
+  } else if (gesture === 'SUDARSHAN CHAKRA') {
+    const indexBase = points[5];
+    const indexTip = points[8];
+    const dx = indexTip.x - indexBase.x;
+    const dy = indexTip.y - indexBase.y;
+    const length = Math.max(1, Math.hypot(dx, dy));
+    addEffect('chakra', indexTip.x, indexTip.y, {
+      vx: dx / length,
+      vy: dy / length,
+      duration: 1100,
+      radius: 27,
+    });
+    showPowerStatus('SUDARSHAN CHAKRA', 'Chakra released. Relax your hand before launching again.');
   }
 }
 
@@ -472,7 +496,7 @@ function updateHands(result, now) {
   if (!hands.length) {
     gestureName.textContent = faceLandmarker ? 'SHOW A HAND OR SQUINT' : 'SHOW A HAND';
     gestureDetail.textContent = faceLandmarker
-      ? 'Spider-Man: index + pinky. Iron Man: open palm. Superman: squint both eyes.'
+      ? 'Spider-Man: index + pinky. Iron Man: open palm. Sudarshan Chakra: index only. Superman: squint both eyes.'
       : 'Use a hand gesture. Eye tracking is not available yet.';
     return;
   }
@@ -482,7 +506,7 @@ function updateHands(result, now) {
   if (hands.length > 1) {
     gestureDetail.textContent = `${hands.length} hands in view`;
   } else if (mainHand.gesture === 'HAND TRACKED') {
-    gestureDetail.textContent = 'Use index + pinky for Spider-Man or an open palm for Iron Man';
+    gestureDetail.textContent = 'Use index + pinky for Spider-Man, index only for Sudarshan Chakra, or an open palm for Iron Man';
   } else {
     gestureDetail.textContent = 'Pose locked. Relax your hand to re-arm';
   }
@@ -725,6 +749,70 @@ function drawRepulsorFlash(effect, progress) {
   ctx.restore();
 }
 
+function drawChakra(effect, progress) {
+  const reach = distanceToEdge(effect.x, effect.y, effect.vx, effect.vy);
+  const travel = 1 - Math.pow(1 - progress, 2.4);
+  const x = effect.x + effect.vx * reach * travel;
+  const y = effect.y + effect.vy * reach * travel;
+  const fade = progress > 0.84 ? Math.max(0, (1 - progress) / 0.16) : 1;
+  const radius = effect.radius || 27;
+
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = `rgba(255, 190, 54, ${0.28 * fade})`;
+  ctx.lineWidth = radius * 0.7;
+  ctx.shadowColor = 'rgba(255, 165, 24, .8)';
+  ctx.shadowBlur = 16;
+  ctx.beginPath();
+  ctx.moveTo(x - effect.vx * radius * 1.8, y - effect.vy * radius * 1.8);
+  ctx.lineTo(x - effect.vx * radius * 0.25, y - effect.vy * radius * 0.25);
+  ctx.stroke();
+
+  ctx.translate(x, y);
+  ctx.rotate(Math.atan2(effect.vy, effect.vx) + progress * Math.PI * 12);
+
+  const glow = ctx.createRadialGradient(0, 0, radius * 0.15, 0, 0, radius * 1.35);
+  glow.addColorStop(0, `rgba(255, 248, 190, ${0.9 * fade})`);
+  glow.addColorStop(0.45, `rgba(255, 190, 48, ${0.46 * fade})`);
+  glow.addColorStop(1, 'rgba(255, 145, 16, 0)');
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(0, 0, radius * 1.35, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.shadowColor = 'rgba(255, 183, 33, .95)';
+  ctx.shadowBlur = 12;
+  ctx.fillStyle = `rgba(255, 207, 75, ${0.94 * fade})`;
+  for (let blade = 0; blade < 12; blade += 1) {
+    const angle = blade * Math.PI / 6;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(angle - 0.12) * radius * 0.42, Math.sin(angle - 0.12) * radius * 0.42);
+    ctx.lineTo(Math.cos(angle - 0.065) * radius * 0.78, Math.sin(angle - 0.065) * radius * 0.78);
+    ctx.lineTo(Math.cos(angle) * radius * 1.08, Math.sin(angle) * radius * 1.08);
+    ctx.lineTo(Math.cos(angle + 0.065) * radius * 0.78, Math.sin(angle + 0.065) * radius * 0.78);
+    ctx.lineTo(Math.cos(angle + 0.12) * radius * 0.42, Math.sin(angle + 0.12) * radius * 0.42);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  ctx.shadowBlur = 4;
+  ctx.strokeStyle = `rgba(255, 250, 213, ${0.98 * fade})`;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(0, 0, radius * 0.72, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.strokeStyle = `rgba(255, 239, 163, ${0.9 * fade})`;
+  ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  ctx.arc(0, 0, radius * 0.39, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.fillStyle = `rgba(255, 255, 226, ${0.98 * fade})`;
+  ctx.beginPath();
+  ctx.arc(0, 0, radius * 0.19, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
 function drawLaserEyes(effect, progress) {
   const flight = Math.min(1, progress / 0.32);
   const eased = 1 - Math.pow(1 - flight, 3);
@@ -801,6 +889,7 @@ function drawEffects(now) {
     if (effect.type === 'web') drawWeb(effect, progress);
     else if (effect.type === 'repulsor') drawRepulsor(effect, progress);
     else if (effect.type === 'repulsor-flash') drawRepulsorFlash(effect, progress);
+    else if (effect.type === 'chakra') drawChakra(effect, progress);
     else if (effect.type === 'laser-eyes') drawLaserEyes(effect, progress);
   }
 }

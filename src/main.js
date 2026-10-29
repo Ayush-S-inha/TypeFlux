@@ -451,18 +451,7 @@ function fireGesture(gesture, points) {
     addEffect('repulsor-flash', palm.x, palm.y, { duration: 260 });
     showPowerStatus('IRON MAN REPULSOR', 'Blast fired. Return to a relaxed hand before firing again.');
   } else if (gesture === 'SUDARSHAN CHAKRA') {
-    const indexBase = points[5];
-    const indexTip = points[8];
-    const dx = indexTip.x - indexBase.x;
-    const dy = indexTip.y - indexBase.y;
-    const length = Math.max(1, Math.hypot(dx, dy));
-    addEffect('chakra', indexTip.x, indexTip.y, {
-      vx: dx / length,
-      vy: dy / length,
-      duration: 1100,
-      radius: 27,
-    });
-    showPowerStatus('SUDARSHAN CHAKRA', 'Chakra released. Relax your hand before launching again.');
+    showPowerStatus('SUDARSHAN CHAKRA', 'Hold the index-only pose to keep the text chakra hovering at your fingertip.');
   }
 }
 
@@ -749,67 +738,80 @@ function drawRepulsorFlash(effect, progress) {
   ctx.restore();
 }
 
-function drawChakra(effect, progress) {
-  const reach = distanceToEdge(effect.x, effect.y, effect.vx, effect.vy);
-  const travel = 1 - Math.pow(1 - progress, 2.4);
-  const x = effect.x + effect.vx * reach * travel;
-  const y = effect.y + effect.vy * reach * travel;
-  const fade = progress > 0.84 ? Math.max(0, (1 - progress) / 0.16) : 1;
-  const radius = effect.radius || 27;
+function drawTextEllipseRing(cx, cy, radiusX, radiusY, pattern, fontSize, color, startAngle = 0) {
+  const characters = Array.from(pattern);
+  if (!characters.length) return;
+
+  const perimeter = Math.PI * (3 * (radiusX + radiusY)
+    - Math.sqrt((3 * radiusX + radiusY) * (radiusX + 3 * radiusY)));
+  const glyphCount = Math.max(characters.length, Math.floor(perimeter / (fontSize * 0.66)));
 
   ctx.save();
-  ctx.lineCap = 'round';
-  ctx.strokeStyle = `rgba(255, 190, 54, ${0.28 * fade})`;
-  ctx.lineWidth = radius * 0.7;
-  ctx.shadowColor = 'rgba(255, 165, 24, .8)';
-  ctx.shadowBlur = 16;
-  ctx.beginPath();
-  ctx.moveTo(x - effect.vx * radius * 1.8, y - effect.vy * radius * 1.8);
-  ctx.lineTo(x - effect.vx * radius * 0.25, y - effect.vy * radius * 0.25);
-  ctx.stroke();
+  ctx.font = `600 ${fontSize}px "Segoe UI Symbol", Arial, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = color;
+  ctx.shadowColor = 'rgba(255, 205, 48, 0.2)';
+  ctx.shadowBlur = 2;
 
-  ctx.translate(x, y);
-  ctx.rotate(Math.atan2(effect.vy, effect.vx) + progress * Math.PI * 12);
+  for (let index = 0; index < glyphCount; index += 1) {
+    const angle = startAngle + (index / glyphCount) * Math.PI * 2;
+    const x = cx + Math.cos(angle) * radiusX;
+    const y = cy + Math.sin(angle) * radiusY;
+    const tangentX = -radiusX * Math.sin(angle);
+    const tangentY = radiusY * Math.cos(angle);
 
-  const glow = ctx.createRadialGradient(0, 0, radius * 0.15, 0, 0, radius * 1.35);
-  glow.addColorStop(0, `rgba(255, 248, 190, ${0.9 * fade})`);
-  glow.addColorStop(0.45, `rgba(255, 190, 48, ${0.46 * fade})`);
-  glow.addColorStop(1, 'rgba(255, 145, 16, 0)');
-  ctx.fillStyle = glow;
-  ctx.beginPath();
-  ctx.arc(0, 0, radius * 1.35, 0, Math.PI * 2);
-  ctx.fill();
-
-  ctx.shadowColor = 'rgba(255, 183, 33, .95)';
-  ctx.shadowBlur = 12;
-  ctx.fillStyle = `rgba(255, 207, 75, ${0.94 * fade})`;
-  for (let blade = 0; blade < 12; blade += 1) {
-    const angle = blade * Math.PI / 6;
-    ctx.beginPath();
-    ctx.moveTo(Math.cos(angle - 0.12) * radius * 0.42, Math.sin(angle - 0.12) * radius * 0.42);
-    ctx.lineTo(Math.cos(angle - 0.065) * radius * 0.78, Math.sin(angle - 0.065) * radius * 0.78);
-    ctx.lineTo(Math.cos(angle) * radius * 1.08, Math.sin(angle) * radius * 1.08);
-    ctx.lineTo(Math.cos(angle + 0.065) * radius * 0.78, Math.sin(angle + 0.065) * radius * 0.78);
-    ctx.lineTo(Math.cos(angle + 0.12) * radius * 0.42, Math.sin(angle + 0.12) * radius * 0.42);
-    ctx.closePath();
-    ctx.fill();
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(Math.atan2(tangentY, tangentX));
+    ctx.fillText(characters[index % characters.length], 0, 0);
+    ctx.restore();
   }
 
-  ctx.shadowBlur = 4;
-  ctx.strokeStyle = `rgba(255, 250, 213, ${0.98 * fade})`;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.arc(0, 0, radius * 0.72, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.strokeStyle = `rgba(255, 239, 163, ${0.9 * fade})`;
-  ctx.lineWidth = 1.4;
-  ctx.beginPath();
-  ctx.arc(0, 0, radius * 0.39, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.fillStyle = `rgba(255, 255, 226, ${0.98 * fade})`;
-  ctx.beginPath();
-  ctx.arc(0, 0, radius * 0.19, 0, Math.PI * 2);
-  ctx.fill();
+  ctx.restore();
+}
+
+function drawTextChakra(indexTip) {
+  // The disc stays still relative to the tracked fingertip: no travel, rotation, or fade animation.
+  const radiusX = Math.min(112, Math.max(46, screenWidth * 0.092));
+  const radiusY = radiusX * 0.29;
+  const centerX = indexTip.x;
+  const centerY = indexTip.y - radiusY * 0.48;
+  const fontSize = Math.max(6.5, radiusX * 0.078);
+
+  drawTextEllipseRing(centerX, centerY, radiusX, radiusY,
+    '✦ · ॐ · ✦ · ॐ · ◆ ·', fontSize, '#ffe16a', -Math.PI / 24);
+  drawTextEllipseRing(centerX, centerY, radiusX * 0.79, radiusY * 0.72,
+    'SUDARSHAN • CHAKRA •', fontSize * 0.82, '#ffd23f', Math.PI / 30);
+  drawTextEllipseRing(centerX, centerY, radiusX * 0.55, radiusY * 0.48,
+    'ॐ • ✦ • ॐ • ✦ •', fontSize * 0.76, '#fff0a1', -Math.PI / 18);
+
+  // Text glyphs form the twelve outer blades; no vector-drawn disc is used.
+  ctx.save();
+  ctx.font = `700 ${fontSize * 1.12}px "Segoe UI Symbol", Arial, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffcf38';
+  ctx.shadowColor = 'rgba(255, 205, 48, 0.18)';
+  ctx.shadowBlur = 2;
+  for (let blade = 0; blade < 12; blade += 1) {
+    const angle = (blade / 12) * Math.PI * 2;
+    const x = centerX + Math.cos(angle) * radiusX * 0.72;
+    const y = centerY + Math.sin(angle) * radiusY * 0.72;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(Math.atan2(radiusY * Math.cos(angle), -radiusX * Math.sin(angle)));
+    ctx.fillText(blade % 2 === 0 ? '◆' : '✦', 0, 0);
+    ctx.restore();
+  }
+  ctx.restore();
+
+  ctx.save();
+  ctx.font = `700 ${fontSize * 1.05}px "Segoe UI Symbol", Arial, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#fff1a3';
+  ctx.fillText('ॐ', centerX, centerY);
   ctx.restore();
 }
 
@@ -878,6 +880,9 @@ function drawEffects(now) {
   if (!effectsEnabled) return;
 
   drawHandGuides();
+  for (const hand of hands) {
+    if (hand.gesture === 'SUDARSHAN CHAKRA') drawTextChakra(hand.points[8]);
+  }
   for (let index = effects.length - 1; index >= 0; index -= 1) {
     const effect = effects[index];
     const progress = Math.max(0, Math.min(1, (now - effect.start) / effect.duration));
@@ -889,7 +894,6 @@ function drawEffects(now) {
     if (effect.type === 'web') drawWeb(effect, progress);
     else if (effect.type === 'repulsor') drawRepulsor(effect, progress);
     else if (effect.type === 'repulsor-flash') drawRepulsorFlash(effect, progress);
-    else if (effect.type === 'chakra') drawChakra(effect, progress);
     else if (effect.type === 'laser-eyes') drawLaserEyes(effect, progress);
   }
 }

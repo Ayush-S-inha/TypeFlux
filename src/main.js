@@ -49,6 +49,7 @@ let lastFaceDetectionAt = 0;
 let eyesSquintedSince = null;
 let eyesOpenSince = null;
 let eyeLaserArmed = true;
+let lastHeatVisionDirection = { vx: 0, vy: 1 };
 let lastFaceSeenAt = 0;
 let statusOverrideUntil = 0;
 let animationFrame = 0;
@@ -57,6 +58,7 @@ let screenHeight = window.innerHeight;
 let pixelRatio = 1;
 let hands = [];
 const effects = [];
+const chakraRadiusByHand = new Map();
 const gestureStates = new Map();
 const GESTURE_HOLD_MS = 150;
 const HAND_LOST_RESET_MS = 450;
@@ -268,6 +270,8 @@ function stopCamera() {
   hands = [];
   effects.length = 0;
   gestureStates.clear();
+  chakraRadiusByHand.clear();
+  lastHeatVisionDirection = { vx: 0, vy: 1 };
   eyesSquintedSince = null;
   eyesOpenSince = null;
   eyeLaserArmed = true;
@@ -518,10 +522,21 @@ function updateFaceTracking(result, now) {
   lastFaceSeenAt = now;
   const leftSquint = scores.get('eyeSquintLeft') || 0;
   const rightSquint = scores.get('eyeSquintRight') || 0;
-  const leftBlink = scores.get('eyeBlinkLeft') || 0;
-  const rightBlink = scores.get('eyeBlinkRight') || 0;
   // Require a deliberate two-eye squeeze, not an ordinary single-frame blink.
   const eyesSqueezed = leftSquint > 0.58 && rightSquint > 0.58;
+
+  // Keep the last reliable gaze direction from open-eye frames. Iris landmarks
+  // become less reliable while the eyes are squeezed to trigger heat vision.
+  if (!eyesSqueezed) {
+    const direction = inferHeatVisionDirection(face);
+    if (direction) {
+      const smoothing = 0.32;
+      const vx = lastHeatVisionDirection.vx * (1 - smoothing) + direction.vx * smoothing;
+      const vy = lastHeatVisionDirection.vy * (1 - smoothing) + direction.vy * smoothing;
+      const magnitude = Math.max(0.001, Math.hypot(vx, vy));
+      lastHeatVisionDirection = { vx: vx / magnitude, vy: vy / magnitude };
+    }
+  }
 
   if (eyesSqueezed) {
     eyesOpenSince = null;
@@ -546,21 +561,69 @@ function averageLandmarks(landmarks, indices) {
   return { x: total.x / indices.length, y: total.y / indices.length };
 }
 
+function inferHeatVisionDirection(face) {
+  // Iris centers (468/473) are measured relative to each eye socket so both
+  // beams can share one direction instead of converging on a common target.
+  const eyeDefinitions = [
+    { iris: 468, corners: [33, 133], upper: 159, lower: 145 },
+    { iris: 473, corners: [362, 263], upper: 386, lower: 374 },
+  ];
+  const samples = [];
+
+  for (const definition of eyeDefinitions) {
+    const irisLandmark = face[definition.iris];
+    const firstCorner = face[definition.corners[0]];
+    const secondCorner = face[definition.corners[1]];
+    const upperLid = face[definition.upper];
+    const lowerLid = face[definition.lower];
+    if (!irisLandmark || !firstCorner || !secondCorner || !upperLid || !lowerLid) continue;
+
+    const iris = screenPoint(irisLandmark);
+    const cornerA = screenPoint(firstCorner);
+    const cornerB = screenPoint(secondCorner);
+    const eyeWidth = Math.max(1, distance(cornerA, cornerB));
+    const centerX = (cornerA.x + cornerB.x) / 2;
+    const centerY = (screenPoint(upperLid).y + screenPoint(lowerLid).y) / 2;
+    const horizontalOffset = (iris.x - centerX) / eyeWidth;
+    const verticalOffset = (centerY - iris.y) / eyeWidth;
+
+    // A small dead zone avoids turning landmark jitter into large beam swings.
+    const normalizeOffset = (value, deadZone, range) => {
+      const magnitude = Math.max(0, Math.abs(value) - deadZone) / range;
+      return Math.sign(value) * Math.min(1, magnitude);
+    };
+    samples.push({
+      x: normalizeOffset(horizontalOffset, 0.045, 0.13),
+      up: normalizeOffset(verticalOffset, 0.025, 0.12),
+    });
+  }
+
+  if (!samples.length) return null;
+  const gazeX = samples.reduce((sum, sample) => sum + sample.x, 0) / samples.length;
+  const gazeUp = samples.reduce((sum, sample) => sum + sample.up, 0) / samples.length;
+
+  // A slight downward default keeps heat vision visible when looking straight
+  // at the camera; looking up or down changes the shared beam angle.
+  let vx = 0.42 + gazeX * 0.9;
+  let vy = 0.18 - gazeUp * 1.0;
+  if (Math.hypot(vx, vy) < 0.08) {
+    vx = 0.42;
+    vy = 0.18;
+  }
+  const magnitude = Math.max(0.001, Math.hypot(vx, vy));
+  return { vx: vx / magnitude, vy: vy / magnitude };
+}
+
 function fireSupermanLaser(face) {
-  // FaceLandmarker returns iris centers at 468 and 473 for the standard 478-point model.
+  // Use the last stable open-eye gaze direction; both rays stay parallel.
   const leftEye = screenPoint(face[468] || averageLandmarks(face, [33, 133, 159, 145]));
   const rightEye = screenPoint(face[473] || averageLandmarks(face, [362, 263, 386, 374]));
   const eyeCenter = { x: (leftEye.x + rightEye.x) / 2, y: (leftEye.y + rightEye.y) / 2 };
-  const nose = screenPoint(face[1]);
-  const eyeDistance = Math.max(1, distance(leftEye, rightEye));
-  const yaw = Math.max(-1.2, Math.min(1.2, (nose.x - eyeCenter.x) / (eyeDistance * 0.42)));
-  const targetX = Math.max(0, Math.min(screenWidth, eyeCenter.x + yaw * screenWidth * 0.42));
-  const targetY = Math.max(0, Math.min(screenHeight, eyeCenter.y + Math.max(130, screenHeight * 0.38)));
 
   addEffect('laser-eyes', eyeCenter.x, eyeCenter.y, {
     eyes: [leftEye, rightEye],
-    targetX,
-    targetY,
+    vx: lastHeatVisionDirection.vx,
+    vy: lastHeatVisionDirection.vy,
     duration: 680,
   });
   showPowerStatus('SUPERMAN HEAT VISION', 'Heat vision fired. Open both eyes to re-arm.');
@@ -771,65 +834,93 @@ function drawTextEllipseRing(cx, cy, radiusX, radiusY, pattern, fontSize, color,
   ctx.restore();
 }
 
-function drawTextChakra(indexTip) {
-  // The disc stays still relative to the tracked fingertip: no travel, rotation, or fade animation.
-  const radiusX = Math.min(112, Math.max(46, screenWidth * 0.092));
-  const radiusY = radiusX * 0.29;
+function drawTextChakra(indexTip, handPoints, landmarks, handKey, now) {
+  // Screen-space palm size provides a natural distance cue; relative MediaPipe
+  // depth adds a modest boost when the pointing fingertip moves toward camera.
+  const palmWidth = distance(handPoints[5], handPoints[17]);
+  const wristDepth = landmarks?.[0]?.z;
+  const tipDepth = landmarks?.[8]?.z;
+  const depthDelta = Number.isFinite(wristDepth) && Number.isFinite(tipDepth)
+    ? Math.max(0, wristDepth - tipDepth)
+    : 0;
+  const depthBoost = 1 + Math.min(0.28, depthDelta * 1.1);
+  const targetRadius = Math.min(275, Math.max(118, palmWidth * 1.72) * depthBoost);
+  const previousRadius = chakraRadiusByHand.get(handKey) ?? targetRadius;
+  const radiusX = previousRadius + (targetRadius - previousRadius) * 0.2;
+  chakraRadiusByHand.set(handKey, radiusX);
+
+  const radiusY = radiusX * 0.285;
   const centerX = indexTip.x;
-  const centerY = indexTip.y - radiusY * 0.48;
-  const fontSize = Math.max(6.5, radiusX * 0.078);
+  const centerY = indexTip.y - radiusY * 0.68;
+  const fontSize = Math.max(9, radiusX * 0.073);
+  const rotation = now * 0.00115;
 
+  // The chakra remains anchored to the fingertip. Only its text rings rotate;
+  // there is no launch, travelling projectile, pulse, or fade animation.
   drawTextEllipseRing(centerX, centerY, radiusX, radiusY,
-    '✦ · ॐ · ✦ · ॐ · ◆ ·', fontSize, '#ffe16a', -Math.PI / 24);
-  drawTextEllipseRing(centerX, centerY, radiusX * 0.79, radiusY * 0.72,
-    'SUDARSHAN • CHAKRA •', fontSize * 0.82, '#ffd23f', Math.PI / 30);
-  drawTextEllipseRing(centerX, centerY, radiusX * 0.55, radiusY * 0.48,
-    'ॐ • ✦ • ॐ • ✦ •', fontSize * 0.76, '#fff0a1', -Math.PI / 18);
+    '✦ · ॐ · ✦ · ◆ · ✦ · ॐ · ✦ ·', fontSize * 0.92, '#ffe98a', rotation);
+  drawTextEllipseRing(centerX, centerY, radiusX * 0.93, radiusY * 0.83,
+    '▲ ◆ ▲ ◆ ▲ ◆ ▲ ◆', fontSize * 0.78, '#ffbd26', -rotation * 1.18);
+  drawTextEllipseRing(centerX, centerY, radiusX * 0.79, radiusY * 0.68,
+    'SUDARSHAN • CHAKRA •', fontSize * 0.75, '#ffd23f', rotation * 0.78);
+  drawTextEllipseRing(centerX, centerY, radiusX * 0.63, radiusY * 0.55,
+    'ॐ • ✦ • ॐ • ✦ •', fontSize * 0.76, '#fff0a1', -rotation * 1.45);
+  drawTextEllipseRing(centerX, centerY, radiusX * 0.45, radiusY * 0.4,
+    '◆ · ॐ · ◆ · ॐ ·', fontSize * 0.62, '#ffcf4a', rotation * 1.05);
 
-  // Text glyphs form the twelve outer blades; no vector-drawn disc is used.
+  // Twelve text-built blades create a clearer radial silhouette while keeping
+  // the entire effect typographic rather than drawing a vector disc.
+  const bladeGlyphs = ['❯', '◆', '✦'];
   ctx.save();
-  ctx.font = `700 ${fontSize * 1.12}px "Segoe UI Symbol", Arial, sans-serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillStyle = '#ffcf38';
-  ctx.shadowColor = 'rgba(255, 205, 48, 0.18)';
-  ctx.shadowBlur = 2;
+  ctx.fillStyle = '#ffd13e';
+  ctx.shadowColor = 'rgba(255, 198, 45, 0.32)';
+  ctx.shadowBlur = 5;
   for (let blade = 0; blade < 12; blade += 1) {
-    const angle = (blade / 12) * Math.PI * 2;
-    const x = centerX + Math.cos(angle) * radiusX * 0.72;
-    const y = centerY + Math.sin(angle) * radiusY * 0.72;
-    ctx.save();
-    ctx.translate(x, y);
-    ctx.rotate(Math.atan2(radiusY * Math.cos(angle), -radiusX * Math.sin(angle)));
-    ctx.fillText(blade % 2 === 0 ? '◆' : '✦', 0, 0);
-    ctx.restore();
+    const angle = rotation + (blade / 12) * Math.PI * 2;
+    for (let step = 0; step < bladeGlyphs.length; step += 1) {
+      const ratio = 0.48 + step * 0.105;
+      const x = centerX + Math.cos(angle) * radiusX * ratio;
+      const y = centerY + Math.sin(angle) * radiusY * ratio;
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(angle + Math.PI / 2);
+      ctx.font = `700 ${fontSize * (step === 1 ? 1.05 : 0.82)}px "Segoe UI Symbol", Arial, sans-serif`;
+      ctx.fillText(bladeGlyphs[step], 0, 0);
+      ctx.restore();
+    }
   }
   ctx.restore();
 
   ctx.save();
-  ctx.font = `700 ${fontSize * 1.05}px "Segoe UI Symbol", Arial, sans-serif`;
+  ctx.font = `700 ${fontSize * 1.25}px "Segoe UI Symbol", Arial, sans-serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillStyle = '#fff1a3';
+  ctx.fillStyle = '#fff4b2';
+  ctx.shadowColor = 'rgba(255, 224, 110, 0.3)';
+  ctx.shadowBlur = 7;
   ctx.fillText('ॐ', centerX, centerY);
   ctx.restore();
 }
 
 function drawLaserEyes(effect, progress) {
-  const flight = Math.min(1, progress / 0.32);
-  const eased = 1 - Math.pow(1 - flight, 3);
+  const launch = Math.min(1, progress / 0.24);
+  const eased = 1 - Math.pow(1 - launch, 3);
   const fade = progress < 0.72 ? 1 : Math.max(0, 1 - (progress - 0.72) / 0.28);
   const eyes = effect.eyes || [];
+  const vx = effect.vx ?? 0;
+  const vy = effect.vy ?? 1;
   ctx.save();
   ctx.lineCap = 'round';
 
   for (const eye of eyes) {
-    const dx = effect.targetX - eye.x;
-    const dy = effect.targetY - eye.y;
-    const endX = eye.x + dx * eased;
-    const endY = eye.y + dy * eased;
+    // Both eyes use the same direction vector, so the beams remain parallel
+    // instead of forming a V by converging on one shared target point.
+    const reach = distanceToEdge(eye.x, eye.y, vx, vy);
+    const endX = eye.x + vx * reach * eased;
+    const endY = eye.y + vy * reach * eased;
 
-    // Outer crimson glow, saturated beam and a narrow hot core.
     ctx.beginPath();
     ctx.moveTo(eye.x, eye.y);
     ctx.lineTo(endX, endY);
@@ -862,16 +953,6 @@ function drawLaserEyes(effect, progress) {
     ctx.shadowBlur = 18;
     ctx.fill();
   }
-
-  if (eased >= 0.98 && fade > 0.1) {
-    ctx.beginPath();
-    ctx.arc(effect.targetX, effect.targetY, 9 + progress * 7, 0, Math.PI * 2);
-    ctx.strokeStyle = `rgba(255, 48, 41, ${0.7 * fade})`;
-    ctx.lineWidth = 2;
-    ctx.shadowColor = 'rgba(255, 12, 24, .95)';
-    ctx.shadowBlur = 18;
-    ctx.stroke();
-  }
   ctx.restore();
 }
 
@@ -881,7 +962,9 @@ function drawEffects(now) {
 
   drawHandGuides();
   for (const hand of hands) {
-    if (hand.gesture === 'SUDARSHAN CHAKRA') drawTextChakra(hand.points[8]);
+    if (hand.gesture === 'SUDARSHAN CHAKRA') {
+      drawTextChakra(hand.points[8], hand.points, hand.landmarks, hand.key, now);
+    }
   }
   for (let index = effects.length - 1; index >= 0; index -= 1) {
     const effect = effects[index];

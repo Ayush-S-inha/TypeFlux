@@ -24,8 +24,10 @@ const HAND_MODEL = 'https://storage.googleapis.com/mediapipe-models/hand_landmar
 const FACE_MODEL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
 const FRAME_INTERVAL = 1000 / 24;
 const FACE_FRAME_INTERVAL = 1000 / 15;
-const EYE_SQUINT_HOLD_MS = 140;
-const EYE_RELEASE_HOLD_MS = 120;
+const EYE_SQUINT_HOLD_MS = 180;
+const EYE_RELEASE_HOLD_MS = 160;
+const EYE_SQUINT_THRESHOLD = 0.52;
+const FACE_LOST_RESET_MS = 240;
 const HAND_CONNECTIONS = [
   [0, 1], [1, 2], [2, 3], [3, 4],
   [0, 5], [5, 6], [6, 7], [7, 8],
@@ -50,6 +52,7 @@ let eyesSquintedSince = null;
 let eyesOpenSince = null;
 let eyeLaserArmed = true;
 let lastHeatVisionDirection = { vx: 0, vy: 1 };
+let lastHeatVisionEyes = null;
 let lastFaceSeenAt = 0;
 let statusOverrideUntil = 0;
 let animationFrame = 0;
@@ -241,11 +244,21 @@ async function startCamera() {
     eyesSquintedSince = null;
     eyesOpenSince = null;
     eyeLaserArmed = true;
+    lastHeatVisionDirection = { vx: 0, vy: 1 };
+    lastHeatVisionEyes = null;
     lastFaceSeenAt = 0;
+    lastFaceDetectionAt = 0;
+    lastDetectionAt = 0;
+    faceTrackingFailed = false;
     animationFrame = requestAnimationFrame(renderLoop);
     loadHandTracking();
     loadFaceTracking();
   } catch (error) {
+    if (stream) {
+      for (const track of stream.getTracks()) track.stop();
+      stream = null;
+    }
+    video.srcObject = null;
     startButton.disabled = false;
     startButton.textContent = 'Try again';
     showMessage(error.name === 'NotAllowedError'
@@ -272,6 +285,7 @@ function stopCamera() {
   gestureStates.clear();
   chakraRadiusByHand.clear();
   lastHeatVisionDirection = { vx: 0, vy: 1 };
+  lastHeatVisionEyes = null;
   eyesSquintedSince = null;
   eyesOpenSince = null;
   eyeLaserArmed = true;
@@ -338,11 +352,29 @@ function recognizeGesture(landmarks) {
   const { index, middle, ring, pinky } = readFingers(landmarks);
   const openPalm = index && middle && ring && pinky;
 
-  // Check specific poses before falling back to a tracked hand.
   if (openPalm) return 'IRON MAN BLAST';
   if (index && pinky && !middle && !ring) return 'SPIDER-MAN WEB';
   if (index && !middle && !ring && !pinky) return 'SUDARSHAN CHAKRA';
   return 'HAND TRACKED';
+}
+
+function isBackOfHandFacingCamera(landmarks, handedness) {
+  if (handedness !== 'Left' && handedness !== 'Right') return false;
+
+  const wrist = landmarks[0];
+  const indexMcp = landmarks[5];
+  const pinkyMcp = landmarks[17];
+  const ax = indexMcp.x - wrist.x;
+  const ay = indexMcp.y - wrist.y;
+  const bx = pinkyMcp.x - wrist.x;
+  const by = pinkyMcp.y - wrist.y;
+  const area = ax * by - ay * bx;
+  const scale = Math.hypot(ax, ay) * Math.hypot(bx, by);
+  if (!scale || Math.abs(area) / scale < 0.28) return false;
+
+  // The camera feed is unmirrored for MediaPipe; its handedness label assumes a mirrored selfie image.
+  const palmFacingSign = handedness === 'Left' ? 1 : -1;
+  return area * palmFacingSign < 0;
 }
 
 function screenPoint(landmark) {
@@ -424,7 +456,6 @@ function fireGesture(gesture, points) {
   }), { x: 0, y: 0 });
 
   if (gesture === 'SPIDER-MAN WEB') {
-    // The web strand follows the extended index finger.
     const indexBase = points[5];
     const indexTip = points[8];
     const dx = indexTip.x - indexBase.x;
@@ -442,7 +473,6 @@ function fireGesture(gesture, points) {
     });
     showPowerStatus('SPIDER-MAN WEB', 'Web fired. Return to a relaxed hand before firing again.');
   } else if (gesture === 'IRON MAN BLAST') {
-    // A repulsor blast leaves the palm in the direction the fingers point.
     const middleTip = points[12];
     const dx = middleTip.x - wrist.x;
     const dy = middleTip.y - wrist.y;
@@ -478,7 +508,13 @@ function updateHands(result, now) {
     const detectedGesture = recognizeGesture(landmarks);
     const settled = settleGesture(key, detectedGesture, now);
     seenHands.add(key);
-    hands.push({ key, landmarks, points, gesture: settled.gesture });
+    hands.push({
+      key,
+      landmarks,
+      points,
+      gesture: settled.gesture,
+      backOfHand: isBackOfHandFacingCamera(landmarks, handedness),
+    });
 
     if (settled.entered) fireGesture(settled.gesture, points);
   }
@@ -511,23 +547,39 @@ function updateFaceTracking(result, now) {
   const scores = new Map(categories.map((item) => [item.categoryName, item.score]));
 
   if (!face || face.length < 478) {
-    if (lastFaceSeenAt && now - lastFaceSeenAt > 500) {
+    if (lastFaceSeenAt && now - lastFaceSeenAt > FACE_LOST_RESET_MS) {
       eyesSquintedSince = null;
       eyesOpenSince = null;
       eyeLaserArmed = true;
+      lastHeatVisionEyes = null;
     }
     return;
   }
 
   lastFaceSeenAt = now;
-  const leftSquint = scores.get('eyeSquintLeft') || 0;
-  const rightSquint = scores.get('eyeSquintRight') || 0;
-  // Require a deliberate two-eye squeeze, not an ordinary single-frame blink.
-  const eyesSqueezed = leftSquint > 0.58 && rightSquint > 0.58;
+  const leftClosure = Math.max(
+    scores.get('eyeSquintLeft') || 0,
+    (scores.get('eyeBlinkLeft') || 0) * 0.9,
+  );
+  const rightClosure = Math.max(
+    scores.get('eyeSquintRight') || 0,
+    (scores.get('eyeBlinkRight') || 0) * 0.9,
+  );
+  const eyesSqueezed = leftClosure > EYE_SQUINT_THRESHOLD
+    && rightClosure > EYE_SQUINT_THRESHOLD;
 
-  // Keep the last reliable gaze direction from open-eye frames. Iris landmarks
-  // become less reliable while the eyes are squeezed to trigger heat vision.
   if (!eyesSqueezed) {
+    const eyes = getHeatVisionEyes(face);
+    if (eyes) {
+      const smoothing = 0.4;
+      lastHeatVisionEyes = lastHeatVisionEyes
+        ? eyes.map((eye, index) => ({
+          x: lastHeatVisionEyes[index].x + (eye.x - lastHeatVisionEyes[index].x) * smoothing,
+          y: lastHeatVisionEyes[index].y + (eye.y - lastHeatVisionEyes[index].y) * smoothing,
+        }))
+        : eyes;
+    }
+
     const direction = inferHeatVisionDirection(face);
     if (direction) {
       const smoothing = 0.32;
@@ -561,9 +613,15 @@ function averageLandmarks(landmarks, indices) {
   return { x: total.x / indices.length, y: total.y / indices.length };
 }
 
+function getHeatVisionEyes(face) {
+  const irises = [face[468], face[473]];
+  if (face.length < 478 || !irises.every((iris) => (
+    iris && Number.isFinite(iris.x) && Number.isFinite(iris.y)
+  ))) return null;
+  return irises.map(screenPoint);
+}
+
 function inferHeatVisionDirection(face) {
-  // Iris centers (468/473) are measured relative to each eye socket so both
-  // beams can share one direction instead of converging on a common target.
   const eyeDefinitions = [
     { iris: 468, corners: [33, 133], upper: 159, lower: 145 },
     { iris: 473, corners: [362, 263], upper: 386, lower: 374 },
@@ -576,7 +634,7 @@ function inferHeatVisionDirection(face) {
     const secondCorner = face[definition.corners[1]];
     const upperLid = face[definition.upper];
     const lowerLid = face[definition.lower];
-    if (!irisLandmark || !firstCorner || !secondCorner || !upperLid || !lowerLid) continue;
+    if (![irisLandmark, firstCorner, secondCorner, upperLid, lowerLid].every(Boolean)) continue;
 
     const iris = screenPoint(irisLandmark);
     const cornerA = screenPoint(firstCorner);
@@ -587,7 +645,6 @@ function inferHeatVisionDirection(face) {
     const horizontalOffset = (iris.x - centerX) / eyeWidth;
     const verticalOffset = (centerY - iris.y) / eyeWidth;
 
-    // A small dead zone avoids turning landmark jitter into large beam swings.
     const normalizeOffset = (value, deadZone, range) => {
       const magnitude = Math.max(0, Math.abs(value) - deadZone) / range;
       return Math.sign(value) * Math.min(1, magnitude);
@@ -601,30 +658,27 @@ function inferHeatVisionDirection(face) {
   if (!samples.length) return null;
   const gazeX = samples.reduce((sum, sample) => sum + sample.x, 0) / samples.length;
   const gazeUp = samples.reduce((sum, sample) => sum + sample.up, 0) / samples.length;
-
-  // A slight downward default keeps heat vision visible when looking straight
-  // at the camera; looking up or down changes the shared beam angle.
-  let vx = 0.42 + gazeX * 0.9;
-  let vy = 0.18 - gazeUp * 1.0;
-  if (Math.hypot(vx, vy) < 0.08) {
-    vx = 0.42;
-    vy = 0.18;
-  }
+  const vx = gazeX * 0.86;
+  const vy = 0.55 - gazeUp * 0.62;
   const magnitude = Math.max(0.001, Math.hypot(vx, vy));
   return { vx: vx / magnitude, vy: vy / magnitude };
 }
 
 function fireSupermanLaser(face) {
-  // Use the last stable open-eye gaze direction; both rays stay parallel.
-  const leftEye = screenPoint(face[468] || averageLandmarks(face, [33, 133, 159, 145]));
-  const rightEye = screenPoint(face[473] || averageLandmarks(face, [362, 263, 386, 374]));
-  const eyeCenter = { x: (leftEye.x + rightEye.x) / 2, y: (leftEye.y + rightEye.y) / 2 };
+  const eyes = lastHeatVisionEyes || [
+    screenPoint(averageLandmarks(face, [33, 133, 159, 145])),
+    screenPoint(averageLandmarks(face, [362, 263, 386, 374])),
+  ];
+  const eyeCenter = {
+    x: (eyes[0].x + eyes[1].x) / 2,
+    y: (eyes[0].y + eyes[1].y) / 2,
+  };
 
   addEffect('laser-eyes', eyeCenter.x, eyeCenter.y, {
-    eyes: [leftEye, rightEye],
+    eyes,
     vx: lastHeatVisionDirection.vx,
     vy: lastHeatVisionDirection.vy,
-    duration: 680,
+    duration: 850,
   });
   showPowerStatus('SUPERMAN HEAT VISION', 'Heat vision fired. Open both eyes to re-arm.');
 }
@@ -703,7 +757,6 @@ function drawWeb(effect, progress) {
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
 
-  // Soft outer glow, then two fine strands for a braided silk look.
   ctx.shadowColor = 'rgba(169, 225, 255, .85)';
   ctx.shadowBlur = 11;
   ctx.strokeStyle = `rgba(147, 211, 255, ${0.45 * fade})`;
@@ -732,7 +785,6 @@ function drawWeb(effect, progress) {
     ctx.stroke();
   }
 
-  // Tiny silk cross-threads keep the strand from reading as a plain laser.
   const threadCount = Math.min(24, Math.floor(length / 27));
   ctx.shadowBlur = 0;
   ctx.strokeStyle = `rgba(195, 235, 255, ${0.72 * fade})`;
@@ -757,7 +809,6 @@ function drawWeb(effect, progress) {
   ctx.arc(head.x, head.y, 2.2 + (1 - travel) * 1.8, 0, Math.PI * 2);
   ctx.fill();
 
-  // Small flash at the shooter end marks where the strand came from.
   ctx.shadowBlur = 8;
   ctx.fillStyle = `rgba(227, 248, 255, ${0.8 * fade})`;
   ctx.beginPath();
@@ -904,19 +955,219 @@ function drawTextChakra(indexTip, handPoints, landmarks, handKey, now) {
   ctx.restore();
 }
 
+function drawGreenLanternRing(points) {
+  const mcp = points[9];
+  const pip = points[10];
+  const palmWidth = distance(points[5], points[17]);
+  const fingerSpan = distance(points[9], points[13]);
+  const fingerWidth = Math.min(palmWidth * 0.24, fingerSpan * 0.5);
+  if (fingerWidth < 7 || distance(mcp, pip) < 8) return;
+
+  const axisX = pip.x - mcp.x;
+  const axisY = pip.y - mcp.y;
+  const angle = Math.atan2(axisY, axisX);
+  const center = {
+    x: mcp.x + axisX * 0.34,
+    y: mcp.y + axisY * 0.34,
+  };
+  const faceWidth = fingerWidth * 1.42;
+  const faceHeight = fingerWidth * 1.72;
+  const halfWidth = faceWidth / 2;
+  const halfHeight = faceHeight / 2;
+  const rim = fingerWidth * 0.075;
+  const corner = fingerWidth * 0.09;
+  const coreRadius = faceWidth * 0.285;
+
+  ctx.save();
+  ctx.translate(center.x, center.y);
+  ctx.rotate(angle + Math.PI / 2);
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+
+  const bandMetal = ctx.createLinearGradient(-fingerWidth * 0.55, 0, fingerWidth * 0.55, 0);
+  bandMetal.addColorStop(0, '#303735');
+  bandMetal.addColorStop(0.2, '#aeb9b0');
+  bandMetal.addColorStop(0.43, '#e8eee5');
+  bandMetal.addColorStop(0.62, '#727c75');
+  bandMetal.addColorStop(0.82, '#d6ded3');
+  bandMetal.addColorStop(1, '#343b36');
+
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.55)';
+  ctx.shadowBlur = fingerWidth * 0.22;
+  ctx.beginPath();
+  ctx.ellipse(0, faceHeight * 0.31, fingerWidth * 0.55, fingerWidth * 0.25, 0, 0, Math.PI * 2);
+  ctx.strokeStyle = '#202824';
+  ctx.lineWidth = fingerWidth * 0.2;
+  ctx.stroke();
+
+  ctx.shadowBlur = 0;
+  ctx.beginPath();
+  ctx.ellipse(0, faceHeight * 0.31, fingerWidth * 0.53, fingerWidth * 0.23, 0, 0, Math.PI * 2);
+  ctx.strokeStyle = bandMetal;
+  ctx.lineWidth = fingerWidth * 0.13;
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.ellipse(0, faceHeight * 0.31, fingerWidth * 0.53, fingerWidth * 0.23, 0, Math.PI * 0.13, Math.PI * 0.87);
+  ctx.strokeStyle = 'rgba(248, 255, 244, 0.82)';
+  ctx.lineWidth = fingerWidth * 0.025;
+  ctx.stroke();
+
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.62)';
+  ctx.shadowBlur = fingerWidth * 0.2;
+  ctx.fillStyle = '#252e29';
+  ctx.strokeStyle = '#d5ded2';
+  ctx.lineWidth = fingerWidth * 0.075;
+  ctx.beginPath();
+  ctx.moveTo(-halfWidth + corner, -halfHeight);
+  ctx.lineTo(halfWidth - corner, -halfHeight);
+  ctx.lineTo(halfWidth, -halfHeight + corner);
+  ctx.lineTo(halfWidth, halfHeight - corner);
+  ctx.lineTo(halfWidth - corner, halfHeight);
+  ctx.lineTo(-halfWidth + corner, halfHeight);
+  ctx.lineTo(-halfWidth, halfHeight - corner);
+  ctx.lineTo(-halfWidth, -halfHeight + corner);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.shadowBlur = 0;
+  const plate = ctx.createLinearGradient(-halfWidth, -halfHeight, halfWidth, halfHeight);
+  plate.addColorStop(0, '#0b4928');
+  plate.addColorStop(0.28, '#087b36');
+  plate.addColorStop(0.58, '#003e20');
+  plate.addColorStop(0.82, '#087331');
+  plate.addColorStop(1, '#002c19');
+  ctx.fillStyle = plate;
+  ctx.strokeStyle = '#142d20';
+  ctx.lineWidth = fingerWidth * 0.035;
+  ctx.beginPath();
+  ctx.moveTo(-halfWidth + rim, -halfHeight + rim);
+  ctx.lineTo(halfWidth - rim, -halfHeight + rim);
+  ctx.lineTo(halfWidth - rim, halfHeight - rim);
+  ctx.lineTo(-halfWidth + rim, halfHeight - rim);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  const railWidth = faceWidth * 0.19;
+  const railTop = -halfHeight + rim * 1.45;
+  const railBottom = halfHeight - rim * 1.45;
+  const railInset = fingerWidth * 0.055;
+  const railGreen = ctx.createLinearGradient(-halfWidth, 0, halfWidth, 0);
+  railGreen.addColorStop(0, '#06451f');
+  railGreen.addColorStop(0.18, '#7cff78');
+  railGreen.addColorStop(0.38, '#20e94e');
+  railGreen.addColorStop(0.62, '#087e2d');
+  railGreen.addColorStop(0.84, '#50f56a');
+  railGreen.addColorStop(1, '#063d20');
+
+  for (const side of [-1, 1]) {
+    const railX = side * (halfWidth - rim - railWidth / 2 - railInset * 0.2);
+    ctx.fillStyle = '#052d1a';
+    ctx.strokeStyle = '#78e88a';
+    ctx.lineWidth = fingerWidth * 0.025;
+    ctx.beginPath();
+    ctx.moveTo(railX - railWidth / 2, railTop + corner * 0.35);
+    ctx.lineTo(railX + railWidth / 2, railTop + corner * 0.35);
+    ctx.lineTo(railX + railWidth / 2, railBottom - corner * 0.35);
+    ctx.lineTo(railX - railWidth / 2, railBottom - corner * 0.35);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = railGreen;
+    ctx.beginPath();
+    ctx.moveTo(railX - railWidth * 0.34, railTop + railInset);
+    ctx.lineTo(railX + railWidth * 0.34, railTop + railInset);
+    ctx.lineTo(railX + railWidth * 0.34, railBottom - railInset);
+    ctx.lineTo(railX - railWidth * 0.34, railBottom - railInset);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.strokeStyle = 'rgba(220, 255, 206, 0.76)';
+    ctx.lineWidth = fingerWidth * 0.025;
+    ctx.beginPath();
+    ctx.moveTo(railX - railWidth * 0.2, railTop + railInset * 1.5);
+    ctx.lineTo(railX - railWidth * 0.2, railBottom - railInset * 1.5);
+    ctx.stroke();
+
+    ctx.strokeStyle = 'rgba(0, 36, 16, 0.72)';
+    ctx.lineWidth = fingerWidth * 0.025;
+    ctx.beginPath();
+    ctx.moveTo(railX + railWidth * 0.23, railTop + railInset * 1.5);
+    ctx.lineTo(railX + railWidth * 0.23, railBottom - railInset * 1.5);
+    ctx.stroke();
+  }
+
+  ctx.beginPath();
+  ctx.arc(0, 0, coreRadius * 1.22, 0, Math.PI * 2);
+  ctx.fillStyle = '#032d1a';
+  ctx.fill();
+  ctx.strokeStyle = '#86c88c';
+  ctx.lineWidth = fingerWidth * 0.055;
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.arc(0, 0, coreRadius * 1.08, 0, Math.PI * 2);
+  ctx.strokeStyle = '#27b64c';
+  ctx.lineWidth = fingerWidth * 0.045;
+  ctx.stroke();
+
+  const gem = ctx.createRadialGradient(
+    -coreRadius * 0.28,
+    -coreRadius * 0.34,
+    coreRadius * 0.04,
+    0,
+    0,
+    coreRadius * 0.98,
+  );
+  gem.addColorStop(0, '#e0ffd0');
+  gem.addColorStop(0.12, '#9bff83');
+  gem.addColorStop(0.34, '#28ef4d');
+  gem.addColorStop(0.68, '#009b36');
+  gem.addColorStop(1, '#003d20');
+  ctx.shadowColor = 'rgba(29, 255, 71, 0.9)';
+  ctx.shadowBlur = fingerWidth * 0.28;
+  ctx.beginPath();
+  ctx.arc(0, 0, coreRadius * 0.91, 0, Math.PI * 2);
+  ctx.fillStyle = gem;
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  ctx.strokeStyle = 'rgba(194, 255, 177, 0.78)';
+  ctx.lineWidth = fingerWidth * 0.018;
+  for (const scale of [0.28, 0.48, 0.68]) {
+    ctx.beginPath();
+    ctx.arc(0, 0, coreRadius * scale, -Math.PI * 0.18, Math.PI * 1.82);
+    ctx.stroke();
+  }
+
+  ctx.beginPath();
+  ctx.arc(-coreRadius * 0.27, -coreRadius * 0.32, coreRadius * 0.12, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(240, 255, 224, 0.88)';
+  ctx.fill();
+
+  ctx.strokeStyle = 'rgba(230, 255, 218, 0.78)';
+  ctx.lineWidth = fingerWidth * 0.022;
+  ctx.beginPath();
+  ctx.moveTo(-halfWidth + rim, -halfHeight + rim * 0.65);
+  ctx.lineTo(halfWidth - rim, -halfHeight + rim * 0.65);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
 function drawLaserEyes(effect, progress) {
-  const launch = Math.min(1, progress / 0.24);
+  const launch = Math.min(1, progress / 0.18);
   const eased = 1 - Math.pow(1 - launch, 3);
-  const fade = progress < 0.72 ? 1 : Math.max(0, 1 - (progress - 0.72) / 0.28);
-  const eyes = effect.eyes || [];
+  const fade = progress < 0.76 ? 1 : Math.max(0, 1 - (progress - 0.76) / 0.24);
   const vx = effect.vx ?? 0;
   const vy = effect.vy ?? 1;
   ctx.save();
   ctx.lineCap = 'round';
 
-  for (const eye of eyes) {
-    // Both eyes use the same direction vector, so the beams remain parallel
-    // instead of forming a V by converging on one shared target point.
+  for (const eye of effect.eyes) {
     const reach = distanceToEdge(eye.x, eye.y, vx, vy);
     const endX = eye.x + vx * reach * eased;
     const endY = eye.y + vy * reach * eased;
@@ -924,33 +1175,33 @@ function drawLaserEyes(effect, progress) {
     ctx.beginPath();
     ctx.moveTo(eye.x, eye.y);
     ctx.lineTo(endX, endY);
-    ctx.strokeStyle = `rgba(255, 25, 42, ${0.52 * fade})`;
-    ctx.lineWidth = 13 * fade + 1;
-    ctx.shadowColor = 'rgba(255, 20, 30, .95)';
-    ctx.shadowBlur = 24;
+    ctx.strokeStyle = `rgba(255, 18, 28, ${0.72 * fade})`;
+    ctx.lineWidth = 16 * fade + 1.5;
+    ctx.shadowColor = 'rgba(255, 20, 30, 1)';
+    ctx.shadowBlur = 30;
     ctx.stroke();
 
     ctx.beginPath();
     ctx.moveTo(eye.x, eye.y);
     ctx.lineTo(endX, endY);
-    ctx.strokeStyle = `rgba(255, 55, 42, ${0.95 * fade})`;
-    ctx.lineWidth = 5 * fade + 0.8;
-    ctx.shadowBlur = 10;
+    ctx.strokeStyle = `rgba(255, 54, 38, ${0.98 * fade})`;
+    ctx.lineWidth = 6 * fade + 0.8;
+    ctx.shadowBlur = 13;
     ctx.stroke();
 
     ctx.beginPath();
     ctx.moveTo(eye.x, eye.y);
     ctx.lineTo(endX, endY);
-    ctx.strokeStyle = `rgba(255, 230, 205, ${0.98 * fade})`;
-    ctx.lineWidth = 1.5 * fade + 0.35;
-    ctx.shadowBlur = 5;
+    ctx.strokeStyle = `rgba(255, 238, 218, ${0.98 * fade})`;
+    ctx.lineWidth = 2 * fade + 0.35;
+    ctx.shadowBlur = 7;
     ctx.stroke();
 
     ctx.beginPath();
     ctx.arc(eye.x, eye.y, 4.5 + (1 - progress) * 2, 0, Math.PI * 2);
-    ctx.fillStyle = `rgba(255, 66, 44, ${fade})`;
+    ctx.fillStyle = `rgba(255, 78, 48, ${fade})`;
     ctx.shadowColor = 'rgba(255, 28, 32, 1)';
-    ctx.shadowBlur = 18;
+    ctx.shadowBlur = 20;
     ctx.fill();
   }
   ctx.restore();
@@ -962,6 +1213,7 @@ function drawEffects(now) {
 
   drawHandGuides();
   for (const hand of hands) {
+    if (hand.backOfHand) drawGreenLanternRing(hand.points);
     if (hand.gesture === 'SUDARSHAN CHAKRA') {
       drawTextChakra(hand.points[8], hand.points, hand.landmarks, hand.key, now);
     }

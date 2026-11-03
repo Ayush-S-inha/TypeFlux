@@ -1,4 +1,16 @@
 import './style.css';
+import {
+  EYE_RELEASE_HOLD_MS,
+  EYE_SQUINT_HOLD_MS,
+  EYE_SQUINT_THRESHOLD,
+  FACE_FRAME_INTERVAL,
+  FACE_LOST_RESET_MS,
+  FRAME_INTERVAL,
+  GESTURE_HOLD_MS,
+  HAND_CONNECTIONS,
+  HAND_LOST_RESET_MS,
+} from './config.js';
+import { createFaceTracker, createHandTracker } from './tracking-runtime.js';
 
 const video = document.querySelector('#camera');
 const canvas = document.querySelector('#effects-canvas');
@@ -17,24 +29,6 @@ const gestureName = document.querySelector('#gesture-name');
 const gestureDetail = document.querySelector('#gesture-detail');
 const gestureGuide = document.querySelector('#gesture-guide');
 const message = document.querySelector('#message');
-
-const TRACKING_MODULE = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.1.1/vision_bundle.mjs';
-const TRACKING_WASM = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.1.1/wasm';
-const HAND_MODEL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
-const FACE_MODEL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
-const FRAME_INTERVAL = 1000 / 24;
-const FACE_FRAME_INTERVAL = 1000 / 15;
-const EYE_SQUINT_HOLD_MS = 180;
-const EYE_RELEASE_HOLD_MS = 160;
-const EYE_SQUINT_THRESHOLD = 0.52;
-const FACE_LOST_RESET_MS = 240;
-const HAND_CONNECTIONS = [
-  [0, 1], [1, 2], [2, 3], [3, 4],
-  [0, 5], [5, 6], [6, 7], [7, 8],
-  [5, 9], [9, 10], [10, 11], [11, 12],
-  [9, 13], [13, 14], [14, 15], [15, 16],
-  [13, 17], [17, 18], [18, 19], [19, 20], [0, 17],
-];
 
 let stream = null;
 let landmarker = null;
@@ -63,8 +57,6 @@ let hands = [];
 const effects = [];
 const chakraRadiusByHand = new Map();
 const gestureStates = new Map();
-const GESTURE_HOLD_MS = 150;
-const HAND_LOST_RESET_MS = 450;
 
 function resizeCanvas() {
   screenWidth = window.innerWidth;
@@ -90,55 +82,6 @@ function showMessage(text) {
 function hideMessage() {
   message.hidden = true;
   message.textContent = '';
-}
-
-async function createHandTracker() {
-  const { FilesetResolver, HandLandmarker } = await import(/* @vite-ignore */ TRACKING_MODULE);
-  const vision = await FilesetResolver.forVisionTasks(TRACKING_WASM);
-  const options = {
-    runningMode: 'VIDEO',
-    numHands: 2,
-    minHandDetectionConfidence: 0.55,
-    minHandPresenceConfidence: 0.55,
-    minTrackingConfidence: 0.5,
-  };
-
-  try {
-    return await HandLandmarker.createFromOptions(vision, {
-      ...options,
-      baseOptions: { modelAssetPath: HAND_MODEL, delegate: 'GPU' },
-    });
-  } catch {
-    return HandLandmarker.createFromOptions(vision, {
-      ...options,
-      baseOptions: { modelAssetPath: HAND_MODEL, delegate: 'CPU' },
-    });
-  }
-}
-
-async function createFaceTracker() {
-  const { FilesetResolver, FaceLandmarker } = await import(/* @vite-ignore */ TRACKING_MODULE);
-  const vision = await FilesetResolver.forVisionTasks(TRACKING_WASM);
-  const options = {
-    runningMode: 'VIDEO',
-    numFaces: 1,
-    outputFaceBlendshapes: true,
-    minFaceDetectionConfidence: 0.55,
-    minFacePresenceConfidence: 0.55,
-    minTrackingConfidence: 0.5,
-  };
-
-  try {
-    return await FaceLandmarker.createFromOptions(vision, {
-      ...options,
-      baseOptions: { modelAssetPath: FACE_MODEL, delegate: 'GPU' },
-    });
-  } catch {
-    return FaceLandmarker.createFromOptions(vision, {
-      ...options,
-      baseOptions: { modelAssetPath: FACE_MODEL, delegate: 'CPU' },
-    });
-  }
 }
 
 function updateTrackingLabel() {
@@ -527,15 +470,15 @@ function showPowerStatus(title, detail) {
   statusOverrideUntil = performance.now() + 850;
 }
 
-function updateHands(result, now) {
+function updateHands(handDetection, now) {
   hands = [];
   const seenHands = new Set();
-  const landmarksList = result.landmarks || [];
+  const landmarksList = handDetection.landmarks || [];
 
   for (let index = 0; index < landmarksList.length; index += 1) {
     const landmarks = landmarksList[index];
     const points = landmarks.map(screenPoint);
-    const handedness = result.handednesses?.[index]?.[0]?.categoryName || `HAND ${index + 1}`;
+    const handedness = handDetection.handednesses?.[index]?.[0]?.categoryName || `HAND ${index + 1}`;
     const key = String(handedness);
     const detectedGesture = recognizeGesture(landmarks);
     const settled = settleGesture(key, detectedGesture, now);
@@ -575,10 +518,10 @@ function updateHands(result, now) {
   }
 }
 
-function updateFaceTracking(result, now) {
-  const face = result.faceLandmarks?.[0];
-  const categories = result.faceBlendshapes?.[0]?.categories || [];
-  const scores = new Map(categories.map((item) => [item.categoryName, item.score]));
+function updateFaceTracking(faceDetection, now) {
+  const face = faceDetection.faceLandmarks?.[0];
+  const categories = faceDetection.faceBlendshapes?.[0]?.categories || [];
+  const scores = new Map(categories.map((category) => [category.categoryName, category.score]));
 
   if (!face || face.length < 478) {
     if (lastFaceSeenAt && now - lastFaceSeenAt > FACE_LOST_RESET_MS) {
@@ -679,9 +622,9 @@ function inferHeatVisionDirection(face) {
     const horizontalOffset = (iris.x - centerX) / eyeWidth;
     const verticalOffset = (centerY - iris.y) / eyeWidth;
 
-    const normalizeOffset = (value, deadZone, range) => {
-      const magnitude = Math.max(0, Math.abs(value) - deadZone) / range;
-      return Math.sign(value) * Math.min(1, magnitude);
+    const normalizeOffset = (offset, deadZone, range) => {
+      const magnitude = Math.max(0, Math.abs(offset) - deadZone) / range;
+      return Math.sign(offset) * Math.min(1, magnitude);
     };
     samples.push({
       x: normalizeOffset(horizontalOffset, 0.045, 0.13),
@@ -1396,8 +1339,8 @@ function renderLoop(now) {
     if (landmarker && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
       && video.currentTime !== lastVideoTime && now - lastDetectionAt >= FRAME_INTERVAL) {
       try {
-        const result = landmarker.detectForVideo(video, now);
-        updateHands(result, now);
+        const handDetection = landmarker.detectForVideo(video, now);
+        updateHands(handDetection, now);
         lastVideoTime = video.currentTime;
         lastDetectionAt = now;
       } catch (error) {

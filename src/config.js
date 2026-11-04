@@ -12,11 +12,15 @@ export const FACE_TRACKING_CONFIDENCE = 0.5;
 
 export const FRAME_INTERVAL = 1000 / 24;
 export const FACE_FRAME_INTERVAL = 1000 / 15;
-export const EYE_SQUINT_HOLD_MS = 180;
-export const EYE_RELEASE_HOLD_MS = 160;
-export const EYE_SQUINT_THRESHOLD = 0.52;
+export const EYE_SQUINT_HOLD_MS = 115;
+export const EYE_RELEASE_HOLD_MS = 180;
+export const EYE_SQUEEZE_ENTER_THRESHOLD = 0.44;
+export const EYE_SQUEEZE_EXIT_THRESHOLD = 0.29;
+export const EYE_SQUEEZE_SMOOTHING = 0.62;
 export const FACE_LOST_RESET_MS = 240;
-export const GESTURE_HOLD_MS = 150;
+export const GESTURE_HOLD_MS = 120;
+export const GESTURE_GAP_MS = 125;
+export const GESTURE_RELEASE_MS = 170;
 export const HAND_LOST_RESET_MS = 450;
 
 export const HAND_CONNECTIONS = [

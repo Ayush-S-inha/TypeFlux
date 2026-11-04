@@ -1,16 +1,19 @@
 import './style.css';
 import {
-  EYE_RELEASE_HOLD_MS,
-  EYE_SQUINT_HOLD_MS,
-  EYE_SQUINT_THRESHOLD,
   FACE_FRAME_INTERVAL,
   FACE_LOST_RESET_MS,
   FRAME_INTERVAL,
-  GESTURE_HOLD_MS,
   HAND_CONNECTIONS,
   HAND_LOST_RESET_MS,
 } from './config.js';
 import { createFaceTracker, createHandTracker } from './tracking-runtime.js';
+import { closeCamera, openCamera, setCameraPaused } from './camera-runtime.js';
+import {
+  classifyPowerGesture,
+  resetEyeSqueeze,
+  settleGesture,
+  updateEyeSqueeze,
+} from './gesture-recognition.js';
 
 const video = document.querySelector('#camera');
 const canvas = document.querySelector('#effects-canvas');
@@ -30,7 +33,7 @@ const gestureDetail = document.querySelector('#gesture-detail');
 const gestureGuide = document.querySelector('#gesture-guide');
 const message = document.querySelector('#message');
 
-let stream = null;
+let cameraStream = null;
 let landmarker = null;
 let faceLandmarker = null;
 let running = false;
@@ -42,9 +45,15 @@ let faceTrackingFailed = false;
 let lastVideoTime = -1;
 let lastDetectionAt = 0;
 let lastFaceDetectionAt = 0;
-let eyesSquintedSince = null;
-let eyesOpenSince = null;
-let eyeLaserArmed = true;
+const eyeSqueeze = {
+  left: 0,
+  right: 0,
+  initialized: false,
+  squeezed: false,
+  squeezedSince: null,
+  openSince: null,
+  armed: true,
+};
 let lastHeatVisionDirection = { vx: 0, vy: 1 };
 let lastHeatVisionEyes = null;
 let lastFaceSeenAt = 0;
@@ -152,22 +161,7 @@ async function startCamera() {
   startButton.textContent = 'Connecting...';
 
   try {
-    if (!navigator.mediaDevices?.getUserMedia) {
-      throw new Error('Camera access is not available in this browser. Open TypeFlux on localhost in a current version of Chrome.');
-    }
-
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: {
-        facingMode: 'user',
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-        frameRate: { ideal: 30, max: 30 },
-      },
-    });
-
-    video.srcObject = stream;
-    await video.play();
+    cameraStream = await openCamera(video);
     running = true;
     paused = false;
     lastVideoTime = -1;
@@ -184,9 +178,7 @@ async function startCamera() {
     trackingLabel.textContent = 'STARTING HAND + EYE TRACKING';
     gestureName.textContent = 'SHOW A HAND OR SQUINT';
     gestureDetail.textContent = 'Spider-Man: index + pinky. Iron Man: open palm. Flash: close fist. Sudarshan Chakra: index only. Superman: squint both eyes.';
-    eyesSquintedSince = null;
-    eyesOpenSince = null;
-    eyeLaserArmed = true;
+    resetEyeSqueeze(eyeSqueeze);
     lastHeatVisionDirection = { vx: 0, vy: 1 };
     lastHeatVisionEyes = null;
     lastFaceSeenAt = 0;
@@ -197,11 +189,7 @@ async function startCamera() {
     loadHandTracking();
     loadFaceTracking();
   } catch (error) {
-    if (stream) {
-      for (const track of stream.getTracks()) track.stop();
-      stream = null;
-    }
-    video.srcObject = null;
+    cameraStream = null;
     startButton.disabled = false;
     startButton.textContent = 'Try again';
     showMessage(error.name === 'NotAllowedError'
@@ -216,22 +204,15 @@ function stopCamera() {
   cancelAnimationFrame(animationFrame);
   animationFrame = 0;
 
-  if (stream) {
-    for (const track of stream.getTracks()) track.stop();
-    stream = null;
-  }
-
-  video.pause();
-  video.srcObject = null;
+  closeCamera(video, cameraStream);
+  cameraStream = null;
   hands = [];
   effects.length = 0;
   gestureStates.clear();
   chakraRadiusByHand.clear();
   lastHeatVisionDirection = { vx: 0, vy: 1 };
   lastHeatVisionEyes = null;
-  eyesSquintedSince = null;
-  eyesOpenSince = null;
-  eyeLaserArmed = true;
+  resetEyeSqueeze(eyeSqueeze);
   lastFaceSeenAt = 0;
   statusOverrideUntil = 0;
   ctx.clearRect(0, 0, screenWidth, screenHeight);
@@ -322,17 +303,6 @@ function isClosedFist(landmarks) {
   return tuckedFingers >= 3 && tipDistance / 4 < 0.82 && thumbGap < 1.05;
 }
 
-function recognizeGesture(landmarks) {
-  const { index, middle, ring, pinky } = readFingers(landmarks);
-  const openPalm = index && middle && ring && pinky;
-
-  if (isClosedFist(landmarks)) return 'FLASH LIGHTNING';
-  if (openPalm) return 'IRON MAN BLAST';
-  if (index && pinky && !middle && !ring) return 'SPIDER-MAN WEB';
-  if (index && !middle && !ring && !pinky) return 'SUDARSHAN CHAKRA';
-  return 'HAND TRACKED';
-}
-
 function isBackOfHandFacingCamera(landmarks, handedness) {
   if (handedness !== 'Left' && handedness !== 'Right') return false;
 
@@ -371,40 +341,6 @@ function addEffect(type, x, y, extra = {}) {
   if (effects.length > 36) effects.splice(0, effects.length - 36);
 }
 
-function settleGesture(key, detectedGesture, now) {
-  let state = gestureStates.get(key);
-  if (!state) {
-    state = {
-      candidate: detectedGesture,
-      candidateSince: now,
-      active: 'HAND TRACKED',
-      missingSince: null,
-      armed: true,
-    };
-    gestureStates.set(key, state);
-  }
-
-  state.missingSince = null;
-  if (detectedGesture !== state.candidate) {
-    state.candidate = detectedGesture;
-    state.candidateSince = now;
-  }
-
-  if (now - state.candidateSince < GESTURE_HOLD_MS || state.active === state.candidate) {
-    return { gesture: state.active, entered: false, armed: state.armed };
-  }
-
-  state.active = state.candidate;
-  if (state.active === 'HAND TRACKED') {
-    state.armed = true;
-    return { gesture: state.active, entered: false, armed: true };
-  }
-
-  const entered = state.armed;
-  state.armed = false;
-  return { gesture: state.active, entered, armed: state.armed };
-}
-
 function resetLostHands(seenHands, now) {
   for (const [key, state] of gestureStates) {
     if (seenHands.has(key)) {
@@ -414,12 +350,7 @@ function resetLostHands(seenHands, now) {
 
     if (state.missingSince === null) state.missingSince = now;
     if (now - state.missingSince < HAND_LOST_RESET_MS) continue;
-    if (state.active === 'HAND TRACKED' && state.candidate === 'HAND TRACKED') continue;
-
-    state.candidate = 'HAND TRACKED';
-    state.candidateSince = now;
-    state.active = 'HAND TRACKED';
-    state.armed = true;
+    gestureStates.delete(key);
   }
 }
 
@@ -480,8 +411,18 @@ function updateHands(handDetection, now) {
     const points = landmarks.map(screenPoint);
     const handedness = handDetection.handednesses?.[index]?.[0]?.categoryName || `HAND ${index + 1}`;
     const key = String(handedness);
-    const detectedGesture = recognizeGesture(landmarks);
-    const settled = settleGesture(key, detectedGesture, now);
+    const state = gestureStates.get(key);
+    const powerGesture = classifyPowerGesture(
+      landmarks,
+      handDetection.worldLandmarks?.[index],
+      state?.fingerStates,
+      video.videoWidth || screenWidth,
+      video.videoHeight || screenHeight,
+    );
+    const detectedGesture = isClosedFist(landmarks) ? 'FLASH LIGHTNING' : powerGesture.gesture;
+    const settled = settleGesture(state, detectedGesture, now);
+    settled.state.fingerStates = powerGesture.fingers;
+    gestureStates.set(key, settled.state);
     seenHands.add(key);
     hands.push({
       key,
@@ -520,19 +461,24 @@ function updateHands(handDetection, now) {
 
 function updateFaceTracking(faceDetection, now) {
   const face = faceDetection.faceLandmarks?.[0];
-  const categories = faceDetection.faceBlendshapes?.[0]?.categories || [];
-  const scores = new Map(categories.map((category) => [category.categoryName, category.score]));
+  const blendshapes = faceDetection.faceBlendshapes?.[0]?.categories || [];
+  const scores = new Map(blendshapes.map((blendshape) => [blendshape.categoryName, blendshape.score]));
 
   if (!face || face.length < 478) {
     if (lastFaceSeenAt && now - lastFaceSeenAt > FACE_LOST_RESET_MS) {
-      eyesSquintedSince = null;
-      eyesOpenSince = null;
-      eyeLaserArmed = true;
+      resetEyeSqueeze(eyeSqueeze);
       lastHeatVisionEyes = null;
+      lastHeatVisionDirection = { vx: 0, vy: 1 };
+      lastFaceSeenAt = 0;
     }
     return;
   }
 
+  if (lastFaceSeenAt && now - lastFaceSeenAt > FACE_LOST_RESET_MS) {
+    resetEyeSqueeze(eyeSqueeze);
+    lastHeatVisionEyes = null;
+    lastHeatVisionDirection = { vx: 0, vy: 1 };
+  }
   lastFaceSeenAt = now;
   const leftClosure = Math.max(
     scores.get('eyeSquintLeft') || 0,
@@ -542,8 +488,8 @@ function updateFaceTracking(faceDetection, now) {
     scores.get('eyeSquintRight') || 0,
     (scores.get('eyeBlinkRight') || 0) * 0.9,
   );
-  const eyesSqueezed = leftClosure > EYE_SQUINT_THRESHOLD
-    && rightClosure > EYE_SQUINT_THRESHOLD;
+  const laserFired = updateEyeSqueeze(eyeSqueeze, leftClosure, rightClosure, now);
+  const eyesSqueezed = eyeSqueeze.squeezed;
 
   if (!eyesSqueezed) {
     const eyes = getHeatVisionEyes(face);
@@ -567,19 +513,12 @@ function updateFaceTracking(faceDetection, now) {
     }
   }
 
-  if (eyesSqueezed) {
-    eyesOpenSince = null;
-    if (eyesSquintedSince === null) eyesSquintedSince = now;
-    if (eyeLaserArmed && now - eyesSquintedSince >= EYE_SQUINT_HOLD_MS) {
-      fireSupermanLaser(face);
-      eyeLaserArmed = false;
-    }
+  if (laserFired) {
+    fireSupermanLaser(face);
     return;
   }
 
-  eyesSquintedSince = null;
-  if (eyesOpenSince === null) eyesOpenSince = now;
-  if (now - eyesOpenSince >= EYE_RELEASE_HOLD_MS) eyeLaserArmed = true;
+  if (eyeSqueeze.squeezed) return;
 }
 
 function averageLandmarks(landmarks, indices) {
@@ -883,8 +822,7 @@ function drawTextChakra(indexTip, handPoints, landmarks, handKey, now) {
   const fontSize = Math.max(9, radiusX * 0.073);
   const rotation = now * 0.00115;
 
-  // The chakra remains anchored to the fingertip. Only its text rings rotate;
-  // there is no launch, travelling projectile, pulse, or fade animation.
+
   drawTextEllipseRing(centerX, centerY, radiusX, radiusY,
     '✦ · ॐ · ✦ · ◆ · ✦ · ॐ · ✦ ·', fontSize * 0.92, '#ffe98a', rotation);
   drawTextEllipseRing(centerX, centerY, radiusX * 0.93, radiusY * 0.83,
@@ -896,8 +834,6 @@ function drawTextChakra(indexTip, handPoints, landmarks, handKey, now) {
   drawTextEllipseRing(centerX, centerY, radiusX * 0.45, radiusY * 0.4,
     '◆ · ॐ · ◆ · ॐ ·', fontSize * 0.62, '#ffcf4a', rotation * 1.05);
 
-  // Twelve text-built blades create a clearer radial silhouette while keeping
-  // the entire effect typographic rather than drawing a vector disc.
   const bladeGlyphs = ['❯', '◆', '✦'];
   ctx.save();
   ctx.textAlign = 'center';
@@ -1367,13 +1303,18 @@ function renderLoop(now) {
 startButton.addEventListener('click', startCamera);
 pauseButton.addEventListener('click', async () => {
   if (!running) return;
-  paused = !paused;
+  const nextPaused = !paused;
+  try {
+    await setCameraPaused(video, nextPaused);
+  } catch (error) {
+    showMessage(error.message || 'Camera playback could not resume.');
+    return;
+  }
+  paused = nextPaused;
   if (paused) {
-    video.pause();
     pauseButton.textContent = 'RESUME';
     engineLabel.textContent = 'CAMERA PAUSED';
   } else {
-    await video.play();
     pauseButton.textContent = 'PAUSE';
     engineLabel.textContent = 'CAMERA INPUT ACTIVE';
     lastVideoTime = -1;

@@ -1,3 +1,4 @@
+import { distance3D, handLandmarkSpace, jointAngleDegrees } from './landmark-geometry.js';
 import {
   EYE_RELEASE_HOLD_MS,
   EYE_SQUEEZE_ENTER_THRESHOLD,
@@ -18,61 +19,32 @@ const FINGER_JOINTS = {
   pinky: [17, 18, 19, 20],
 };
 
-function distance(a, b) {
-  return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
-}
-
-function jointAngle(a, b, c) {
-  const bax = a.x - b.x;
-  const bay = a.y - b.y;
-  const baz = a.z - b.z;
-  const bcx = c.x - b.x;
-  const bcy = c.y - b.y;
-  const bcz = c.z - b.z;
-  const denominator = Math.hypot(bax, bay, baz) * Math.hypot(bcx, bcy, bcz);
-  if (!denominator) return 0;
-  const cosine = Math.max(-1, Math.min(1, (bax * bcx + bay * bcy + baz * bcz) / denominator));
-  return Math.acos(cosine) * (180 / Math.PI);
-}
-
-function handSpace(landmarks, worldLandmarks, width, height) {
-  if (worldLandmarks?.length >= 21 && worldLandmarks.every((point) => (
-    Number.isFinite(point.x) && Number.isFinite(point.y) && Number.isFinite(point.z)
-  ))) return worldLandmarks;
-
-  return landmarks.map((point) => ({
-    x: point.x * width,
-    y: point.y * height,
-    z: (point.z || 0) * width,
-  }));
-}
-
-function fingerShape(points, joints, previous) {
+function fingerShape(handPoints, joints, priorShape) {
   const [mcpIndex, pipIndex, dipIndex, tipIndex] = joints;
-  const mcp = points[mcpIndex];
-  const pip = points[pipIndex];
-  const dip = points[dipIndex];
-  const tip = points[tipIndex];
-  const pipAngle = jointAngle(mcp, pip, dip);
-  const dipAngle = jointAngle(pip, dip, tip);
-  const chainLength = distance(mcp, pip) + distance(pip, dip) + distance(dip, tip);
-  const reach = chainLength ? distance(mcp, tip) / chainLength : 0;
+  const mcp = handPoints[mcpIndex];
+  const pip = handPoints[pipIndex];
+  const dip = handPoints[dipIndex];
+  const tip = handPoints[tipIndex];
+  const pipAngle = jointAngleDegrees(mcp, pip, dip);
+  const dipAngle = jointAngleDegrees(pip, dip, tip);
+  const chainLength = distance3D(mcp, pip) + distance3D(pip, dip) + distance3D(dip, tip);
+  const reach = chainLength ? distance3D(mcp, tip) / chainLength : 0;
   const straightness = Math.min(pipAngle, dipAngle);
-  const extended = previous === 'extended'
+  const extended = priorShape === 'extended'
     ? straightness > 126 && reach > 0.66
     : straightness > 140 && reach > 0.73;
-  const curled = previous === 'curled'
+  const curled = priorShape === 'curled'
     ? straightness < 122 || reach < 0.73
     : straightness < 108 || reach < 0.65;
 
   return extended ? 'extended' : curled ? 'curled' : 'bent';
 }
 
-export function classifyPowerGesture(landmarks, worldLandmarks, previousFingers = {}, width = 1280, height = 720) {
-  const points = handSpace(landmarks, worldLandmarks, width, height);
+export function classifyPowerGesture(landmarks, worldLandmarks, previousFingers = {}, videoWidth = 1280, videoHeight = 720) {
+  const handPoints = handLandmarkSpace(landmarks, worldLandmarks, videoWidth, videoHeight);
   const fingers = {};
   for (const [name, joints] of Object.entries(FINGER_JOINTS)) {
-    fingers[name] = fingerShape(points, joints, previousFingers[name]);
+    fingers[name] = fingerShape(handPoints, joints, previousFingers[name]);
   }
 
   const extended = (name) => fingers[name] === 'extended';

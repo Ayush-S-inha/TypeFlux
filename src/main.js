@@ -9,6 +9,12 @@ import {
 import { createFaceTracker, createHandTracker } from './tracking-runtime.js';
 import { closeCamera, openCamera, setCameraPaused } from './camera-runtime.js';
 import {
+  distance2D,
+  isBackOfHandFacingCamera,
+  isClosedFist,
+  mapLandmarkToScreen,
+} from './landmark-geometry.js';
+import {
   classifyPowerGesture,
   resetEyeSqueeze,
   settleGesture,
@@ -230,110 +236,14 @@ function stopCamera() {
   trackingLabel.textContent = 'TRACKING OFF';
 }
 
-function distance(a, b) {
-  return Math.hypot(a.x - b.x, a.y - b.y);
-}
-
-function landmarkDistance(a, b) {
-  const dx = a.x - b.x;
-  const dy = a.y - b.y;
-  const dz = Number.isFinite(a.z) && Number.isFinite(b.z) ? a.z - b.z : 0;
-  return Math.hypot(dx, dy, dz);
-}
-
-function jointAngle(a, b, c) {
-  const useDepth = [a, b, c].every((point) => Number.isFinite(point.z));
-  const bax = a.x - b.x;
-  const bay = a.y - b.y;
-  const baz = useDepth ? a.z - b.z : 0;
-  const bcx = c.x - b.x;
-  const bcy = c.y - b.y;
-  const bcz = useDepth ? c.z - b.z : 0;
-  const denominator = Math.hypot(bax, bay, baz) * Math.hypot(bcx, bcy, bcz);
-  if (!denominator) return 0;
-  const cosine = Math.max(-1, Math.min(1, (bax * bcx + bay * bcy + baz * bcz) / denominator));
-  return Math.acos(cosine) * (180 / Math.PI);
-}
-
-function fingerIsExtended(landmarks, mcpIndex, pipIndex, dipIndex, tipIndex) {
-  const pipAngle = jointAngle(landmarks[mcpIndex], landmarks[pipIndex], landmarks[dipIndex]);
-  const dipAngle = jointAngle(landmarks[pipIndex], landmarks[dipIndex], landmarks[tipIndex]);
-  const tipBeyondJoint = landmarkDistance(landmarks[tipIndex], landmarks[pipIndex])
-    > landmarkDistance(landmarks[dipIndex], landmarks[pipIndex]) * 0.72;
-  return pipAngle > 135 && dipAngle > 135 && tipBeyondJoint;
-}
-
-function readFingers(landmarks) {
-  return {
-    index: fingerIsExtended(landmarks, 5, 6, 7, 8),
-    middle: fingerIsExtended(landmarks, 9, 10, 11, 12),
-    ring: fingerIsExtended(landmarks, 13, 14, 15, 16),
-    pinky: fingerIsExtended(landmarks, 17, 18, 19, 20),
-  };
-}
-
-function isClosedFist(landmarks) {
-  const fingers = readFingers(landmarks);
-  if (Object.values(fingers).some(Boolean)) return false;
-
-  const palm = { x: 0, y: 0, z: 0 };
-  for (const index of [0, 5, 9, 13, 17]) {
-    palm.x += landmarks[index].x / 5;
-    palm.y += landmarks[index].y / 5;
-    palm.z += (landmarks[index].z || 0) / 5;
-  }
-
-  const palmWidth = landmarkDistance(landmarks[5], landmarks[17]);
-  if (palmWidth < 0.025) return false;
-
-  let tuckedFingers = 0;
-  let tipDistance = 0;
-  for (const index of [8, 12, 16, 20]) {
-    const ratio = landmarkDistance(landmarks[index], palm) / palmWidth;
-    tipDistance += ratio;
-    if (ratio < 0.82) tuckedFingers += 1;
-  }
-
-  const thumbGap = Math.min(
-    landmarkDistance(landmarks[4], landmarks[5]),
-    landmarkDistance(landmarks[4], landmarks[6]),
-    landmarkDistance(landmarks[4], landmarks[9]),
-  ) / palmWidth;
-
-  return tuckedFingers >= 3 && tipDistance / 4 < 0.82 && thumbGap < 1.05;
-}
-
-function isBackOfHandFacingCamera(landmarks, handedness) {
-  if (handedness !== 'Left' && handedness !== 'Right') return false;
-
-  const wrist = landmarks[0];
-  const indexMcp = landmarks[5];
-  const pinkyMcp = landmarks[17];
-  const ax = indexMcp.x - wrist.x;
-  const ay = indexMcp.y - wrist.y;
-  const bx = pinkyMcp.x - wrist.x;
-  const by = pinkyMcp.y - wrist.y;
-  const area = ax * by - ay * bx;
-  const scale = Math.hypot(ax, ay) * Math.hypot(bx, by);
-  if (!scale || Math.abs(area) / scale < 0.28) return false;
-
-  // The camera feed is unmirrored for MediaPipe; its handedness label assumes a mirrored selfie image.
-  const palmFacingSign = handedness === 'Left' ? 1 : -1;
-  return area * palmFacingSign < 0;
-}
-
 function screenPoint(landmark) {
-  const videoWidth = video.videoWidth || screenWidth;
-  const videoHeight = video.videoHeight || screenHeight;
-  const coverScale = Math.max(screenWidth / videoWidth, screenHeight / videoHeight);
-  const renderWidth = videoWidth * coverScale;
-  const renderHeight = videoHeight * coverScale;
-  const cropX = (renderWidth - screenWidth) / 2;
-  const cropY = (renderHeight - screenHeight) / 2;
-  return {
-    x: (1 - landmark.x) * renderWidth - cropX,
-    y: landmark.y * renderHeight - cropY,
-  };
+  return mapLandmarkToScreen(
+    landmark,
+    video.videoWidth || screenWidth,
+    video.videoHeight || screenHeight,
+    screenWidth,
+    screenHeight,
+  );
 }
 
 function addEffect(type, x, y, extra = {}) {
@@ -408,6 +318,8 @@ function updateHands(handDetection, now) {
 
   for (let index = 0; index < landmarksList.length; index += 1) {
     const landmarks = landmarksList[index];
+    const videoWidth = video.videoWidth || screenWidth;
+    const videoHeight = video.videoHeight || screenHeight;
     const points = landmarks.map(screenPoint);
     const handedness = handDetection.handednesses?.[index]?.[0]?.categoryName || `HAND ${index + 1}`;
     const key = String(handedness);
@@ -416,10 +328,15 @@ function updateHands(handDetection, now) {
       landmarks,
       handDetection.worldLandmarks?.[index],
       state?.fingerStates,
-      video.videoWidth || screenWidth,
-      video.videoHeight || screenHeight,
+      videoWidth,
+      videoHeight,
     );
-    const detectedGesture = isClosedFist(landmarks) ? 'FLASH LIGHTNING' : powerGesture.gesture;
+    const detectedGesture = isClosedFist(
+      landmarks,
+      handDetection.worldLandmarks?.[index],
+      videoWidth,
+      videoHeight,
+    ) ? 'FLASH LIGHTNING' : powerGesture.gesture;
     const settled = settleGesture(state, detectedGesture, now);
     settled.state.fingerStates = powerGesture.fingers;
     gestureStates.set(key, settled.state);
@@ -429,7 +346,12 @@ function updateHands(handDetection, now) {
       landmarks,
       points,
       gesture: settled.gesture,
-      backOfHand: isBackOfHandFacingCamera(landmarks, handedness),
+      backOfHand: isBackOfHandFacingCamera(
+        landmarks,
+        handedness,
+        videoWidth,
+        videoHeight,
+      ),
     });
 
     if (settled.entered) fireGesture(settled.gesture, points);
@@ -555,7 +477,7 @@ function inferHeatVisionDirection(face) {
     const iris = screenPoint(irisLandmark);
     const cornerA = screenPoint(firstCorner);
     const cornerB = screenPoint(secondCorner);
-    const eyeWidth = Math.max(1, distance(cornerA, cornerB));
+    const eyeWidth = Math.max(1, distance2D(cornerA, cornerB));
     const centerX = (cornerA.x + cornerB.x) / 2;
     const centerY = (screenPoint(upperLid).y + screenPoint(lowerLid).y) / 2;
     const horizontalOffset = (iris.x - centerX) / eyeWidth;
@@ -804,7 +726,7 @@ function drawTextEllipseRing(cx, cy, radiusX, radiusY, pattern, fontSize, color,
 function drawTextChakra(indexTip, handPoints, landmarks, handKey, now) {
   // Screen-space palm size provides a natural distance cue; relative MediaPipe
   // depth adds a modest boost when the pointing fingertip moves toward camera.
-  const palmWidth = distance(handPoints[5], handPoints[17]);
+  const palmWidth = distance2D(handPoints[5], handPoints[17]);
   const wristDepth = landmarks?.[0]?.z;
   const tipDepth = landmarks?.[8]?.z;
   const depthDelta = Number.isFinite(wristDepth) && Number.isFinite(tipDepth)
@@ -822,7 +744,8 @@ function drawTextChakra(indexTip, handPoints, landmarks, handKey, now) {
   const fontSize = Math.max(9, radiusX * 0.073);
   const rotation = now * 0.00115;
 
-
+  // The chakra remains anchored to the fingertip. Only its text rings rotate;
+  // there is no launch, travelling projectile, pulse, or fade animation.
   drawTextEllipseRing(centerX, centerY, radiusX, radiusY,
     '✦ · ॐ · ✦ · ◆ · ✦ · ॐ · ✦ ·', fontSize * 0.92, '#ffe98a', rotation);
   drawTextEllipseRing(centerX, centerY, radiusX * 0.93, radiusY * 0.83,
@@ -834,6 +757,8 @@ function drawTextChakra(indexTip, handPoints, landmarks, handKey, now) {
   drawTextEllipseRing(centerX, centerY, radiusX * 0.45, radiusY * 0.4,
     '◆ · ॐ · ◆ · ॐ ·', fontSize * 0.62, '#ffcf4a', rotation * 1.05);
 
+  // Twelve text-built blades create a clearer radial silhouette while keeping
+  // the entire effect typographic rather than drawing a vector disc.
   const bladeGlyphs = ['❯', '◆', '✦'];
   ctx.save();
   ctx.textAlign = 'center';
@@ -871,10 +796,10 @@ function drawTextChakra(indexTip, handPoints, landmarks, handKey, now) {
 function drawGreenLanternRing(points) {
   const mcp = points[9];
   const pip = points[10];
-  const palmWidth = distance(points[5], points[17]);
-  const fingerSpan = distance(points[9], points[13]);
+  const palmWidth = distance2D(points[5], points[17]);
+  const fingerSpan = distance2D(points[9], points[13]);
   const fingerWidth = Math.min(palmWidth * 0.24, fingerSpan * 0.5);
-  if (fingerWidth < 7 || distance(mcp, pip) < 8) return;
+  if (fingerWidth < 7 || distance2D(mcp, pip) < 8) return;
 
   const axisX = pip.x - mcp.x;
   const axisY = pip.y - mcp.y;

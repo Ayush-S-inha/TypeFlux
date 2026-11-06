@@ -4,7 +4,6 @@ import {
   FACE_LOST_RESET_MS,
   FRAME_INTERVAL,
   HAND_CONNECTIONS,
-  HAND_LOST_RESET_MS,
 } from './config.js';
 import { createFaceTracker, createHandTracker } from './tracking-runtime.js';
 import { closeCamera, openCamera, setCameraPaused } from './camera-runtime.js';
@@ -17,9 +16,9 @@ import {
 import {
   classifyPowerGesture,
   resetEyeSqueeze,
-  settleGesture,
   updateEyeSqueeze,
 } from './gesture-recognition.js';
+import { createGestureStateStore } from './gesture-state.js';
 
 const video = document.querySelector('#camera');
 const canvas = document.querySelector('#effects-canvas');
@@ -71,7 +70,7 @@ let pixelRatio = 1;
 let hands = [];
 const effects = [];
 const chakraRadiusByHand = new Map();
-const gestureStates = new Map();
+const gestureStateStore = createGestureStateStore();
 
 function resizeCanvas() {
   screenWidth = window.innerWidth;
@@ -214,7 +213,7 @@ function stopCamera() {
   cameraStream = null;
   hands = [];
   effects.length = 0;
-  gestureStates.clear();
+  gestureStateStore.clear();
   chakraRadiusByHand.clear();
   lastHeatVisionDirection = { vx: 0, vy: 1 };
   lastHeatVisionEyes = null;
@@ -249,19 +248,6 @@ function screenPoint(landmark) {
 function addEffect(type, x, y, extra = {}) {
   effects.push({ type, x, y, start: performance.now(), duration: 900, ...extra });
   if (effects.length > 36) effects.splice(0, effects.length - 36);
-}
-
-function resetLostHands(seenHands, now) {
-  for (const [key, state] of gestureStates) {
-    if (seenHands.has(key)) {
-      state.missingSince = null;
-      continue;
-    }
-
-    if (state.missingSince === null) state.missingSince = now;
-    if (now - state.missingSince < HAND_LOST_RESET_MS) continue;
-    gestureStates.delete(key);
-  }
 }
 
 function fireGesture(gesture, points) {
@@ -323,11 +309,10 @@ function updateHands(handDetection, now) {
     const points = landmarks.map(screenPoint);
     const handedness = handDetection.handednesses?.[index]?.[0]?.categoryName || `HAND ${index + 1}`;
     const key = String(handedness);
-    const state = gestureStates.get(key);
     const powerGesture = classifyPowerGesture(
       landmarks,
       handDetection.worldLandmarks?.[index],
-      state?.fingerStates,
+      gestureStateStore.getFingerStates(key),
       videoWidth,
       videoHeight,
     );
@@ -337,9 +322,7 @@ function updateHands(handDetection, now) {
       videoWidth,
       videoHeight,
     ) ? 'FLASH LIGHTNING' : powerGesture.gesture;
-    const settled = settleGesture(state, detectedGesture, now);
-    settled.state.fingerStates = powerGesture.fingers;
-    gestureStates.set(key, settled.state);
+    const settled = gestureStateStore.settle(key, detectedGesture, powerGesture.fingers, now);
     seenHands.add(key);
     hands.push({
       key,
@@ -357,7 +340,7 @@ function updateHands(handDetection, now) {
     if (settled.entered) fireGesture(settled.gesture, points);
   }
 
-  resetLostHands(seenHands, now);
+  gestureStateStore.expireUnseen(seenHands, now);
 
   if (now < statusOverrideUntil) return;
   if (!hands.length) {

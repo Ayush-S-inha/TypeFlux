@@ -1,11 +1,11 @@
 import './style.css';
 import {
   FACE_FRAME_INTERVAL,
-  FACE_LOST_RESET_MS,
   FRAME_INTERVAL,
   HAND_CONNECTIONS,
 } from './config.js';
-import { createFaceTracker, createHandTracker } from './tracking-runtime.js';
+import { createHandTracker } from './tracking-runtime.js';
+import { createFaceTracker, createFaceTrackingState } from './face-tracking.js';
 import { closeCamera, openCamera, setCameraPaused } from './camera-runtime.js';
 import {
   distance2D,
@@ -13,11 +13,7 @@ import {
   isClosedFist,
   mapLandmarkToScreen,
 } from './landmark-geometry.js';
-import {
-  classifyPowerGesture,
-  resetEyeSqueeze,
-  updateEyeSqueeze,
-} from './gesture-recognition.js';
+import { classifyPowerGesture } from './gesture-recognition.js';
 import { createGestureStateStore } from './gesture-state.js';
 
 const video = document.querySelector('#camera');
@@ -50,18 +46,7 @@ let faceTrackingFailed = false;
 let lastVideoTime = -1;
 let lastDetectionAt = 0;
 let lastFaceDetectionAt = 0;
-const eyeSqueeze = {
-  left: 0,
-  right: 0,
-  initialized: false,
-  squeezed: false,
-  squeezedSince: null,
-  openSince: null,
-  armed: true,
-};
-let lastHeatVisionDirection = { vx: 0, vy: 1 };
-let lastHeatVisionEyes = null;
-let lastFaceSeenAt = 0;
+const faceTrackingState = createFaceTrackingState();
 let statusOverrideUntil = 0;
 let animationFrame = 0;
 let screenWidth = window.innerWidth;
@@ -183,10 +168,7 @@ async function startCamera() {
     trackingLabel.textContent = 'STARTING HAND + EYE TRACKING';
     gestureName.textContent = 'SHOW A HAND OR SQUINT';
     gestureDetail.textContent = 'Spider-Man: index + pinky. Iron Man: open palm. Flash: close fist. Sudarshan Chakra: index only. Superman: squint both eyes.';
-    resetEyeSqueeze(eyeSqueeze);
-    lastHeatVisionDirection = { vx: 0, vy: 1 };
-    lastHeatVisionEyes = null;
-    lastFaceSeenAt = 0;
+    faceTrackingState.reset();
     lastFaceDetectionAt = 0;
     lastDetectionAt = 0;
     faceTrackingFailed = false;
@@ -215,10 +197,7 @@ function stopCamera() {
   effects.length = 0;
   gestureStateStore.clear();
   chakraRadiusByHand.clear();
-  lastHeatVisionDirection = { vx: 0, vy: 1 };
-  lastHeatVisionEyes = null;
-  resetEyeSqueeze(eyeSqueeze);
-  lastFaceSeenAt = 0;
+  faceTrackingState.reset();
   statusOverrideUntil = 0;
   ctx.clearRect(0, 0, screenWidth, screenHeight);
   gestureReadout.hidden = true;
@@ -365,65 +344,10 @@ function updateHands(handDetection, now) {
 }
 
 function updateFaceTracking(faceDetection, now) {
-  const face = faceDetection.faceLandmarks?.[0];
-  const blendshapes = faceDetection.faceBlendshapes?.[0]?.categories || [];
-  const scores = new Map(blendshapes.map((blendshape) => [blendshape.categoryName, blendshape.score]));
-
-  if (!face || face.length < 478) {
-    if (lastFaceSeenAt && now - lastFaceSeenAt > FACE_LOST_RESET_MS) {
-      resetEyeSqueeze(eyeSqueeze);
-      lastHeatVisionEyes = null;
-      lastHeatVisionDirection = { vx: 0, vy: 1 };
-      lastFaceSeenAt = 0;
-    }
-    return;
+  const faceState = faceTrackingState.update(faceDetection, now, screenPoint);
+  if (faceState?.laserFired) {
+    fireSupermanLaser(faceState.face, faceState.eyes, faceState.direction);
   }
-
-  if (lastFaceSeenAt && now - lastFaceSeenAt > FACE_LOST_RESET_MS) {
-    resetEyeSqueeze(eyeSqueeze);
-    lastHeatVisionEyes = null;
-    lastHeatVisionDirection = { vx: 0, vy: 1 };
-  }
-  lastFaceSeenAt = now;
-  const leftClosure = Math.max(
-    scores.get('eyeSquintLeft') || 0,
-    (scores.get('eyeBlinkLeft') || 0) * 0.9,
-  );
-  const rightClosure = Math.max(
-    scores.get('eyeSquintRight') || 0,
-    (scores.get('eyeBlinkRight') || 0) * 0.9,
-  );
-  const laserFired = updateEyeSqueeze(eyeSqueeze, leftClosure, rightClosure, now);
-  const eyesSqueezed = eyeSqueeze.squeezed;
-
-  if (!eyesSqueezed) {
-    const eyes = getHeatVisionEyes(face);
-    if (eyes) {
-      const smoothing = 0.4;
-      lastHeatVisionEyes = lastHeatVisionEyes
-        ? eyes.map((eye, index) => ({
-          x: lastHeatVisionEyes[index].x + (eye.x - lastHeatVisionEyes[index].x) * smoothing,
-          y: lastHeatVisionEyes[index].y + (eye.y - lastHeatVisionEyes[index].y) * smoothing,
-        }))
-        : eyes;
-    }
-
-    const direction = inferHeatVisionDirection(face);
-    if (direction) {
-      const smoothing = 0.32;
-      const vx = lastHeatVisionDirection.vx * (1 - smoothing) + direction.vx * smoothing;
-      const vy = lastHeatVisionDirection.vy * (1 - smoothing) + direction.vy * smoothing;
-      const magnitude = Math.max(0.001, Math.hypot(vx, vy));
-      lastHeatVisionDirection = { vx: vx / magnitude, vy: vy / magnitude };
-    }
-  }
-
-  if (laserFired) {
-    fireSupermanLaser(face);
-    return;
-  }
-
-  if (eyeSqueeze.squeezed) return;
 }
 
 function averageLandmarks(landmarks, indices) {
@@ -434,59 +358,8 @@ function averageLandmarks(landmarks, indices) {
   return { x: total.x / indices.length, y: total.y / indices.length };
 }
 
-function getHeatVisionEyes(face) {
-  const irises = [face[468], face[473]];
-  if (face.length < 478 || !irises.every((iris) => (
-    iris && Number.isFinite(iris.x) && Number.isFinite(iris.y)
-  ))) return null;
-  return irises.map(screenPoint);
-}
-
-function inferHeatVisionDirection(face) {
-  const eyeDefinitions = [
-    { iris: 468, corners: [33, 133], upper: 159, lower: 145 },
-    { iris: 473, corners: [362, 263], upper: 386, lower: 374 },
-  ];
-  const samples = [];
-
-  for (const definition of eyeDefinitions) {
-    const irisLandmark = face[definition.iris];
-    const firstCorner = face[definition.corners[0]];
-    const secondCorner = face[definition.corners[1]];
-    const upperLid = face[definition.upper];
-    const lowerLid = face[definition.lower];
-    if (![irisLandmark, firstCorner, secondCorner, upperLid, lowerLid].every(Boolean)) continue;
-
-    const iris = screenPoint(irisLandmark);
-    const cornerA = screenPoint(firstCorner);
-    const cornerB = screenPoint(secondCorner);
-    const eyeWidth = Math.max(1, distance2D(cornerA, cornerB));
-    const centerX = (cornerA.x + cornerB.x) / 2;
-    const centerY = (screenPoint(upperLid).y + screenPoint(lowerLid).y) / 2;
-    const horizontalOffset = (iris.x - centerX) / eyeWidth;
-    const verticalOffset = (centerY - iris.y) / eyeWidth;
-
-    const normalizeOffset = (offset, deadZone, range) => {
-      const magnitude = Math.max(0, Math.abs(offset) - deadZone) / range;
-      return Math.sign(offset) * Math.min(1, magnitude);
-    };
-    samples.push({
-      x: normalizeOffset(horizontalOffset, 0.045, 0.13),
-      up: normalizeOffset(verticalOffset, 0.025, 0.12),
-    });
-  }
-
-  if (!samples.length) return null;
-  const gazeX = samples.reduce((sum, sample) => sum + sample.x, 0) / samples.length;
-  const gazeUp = samples.reduce((sum, sample) => sum + sample.up, 0) / samples.length;
-  const vx = gazeX * 0.86;
-  const vy = 0.55 - gazeUp * 0.62;
-  const magnitude = Math.max(0.001, Math.hypot(vx, vy));
-  return { vx: vx / magnitude, vy: vy / magnitude };
-}
-
-function fireSupermanLaser(face) {
-  const eyes = lastHeatVisionEyes || [
+function fireSupermanLaser(face, eyePoints, direction) {
+  const eyes = eyePoints || [
     screenPoint(averageLandmarks(face, [33, 133, 159, 145])),
     screenPoint(averageLandmarks(face, [362, 263, 386, 374])),
   ];
@@ -497,8 +370,8 @@ function fireSupermanLaser(face) {
 
   addEffect('laser-eyes', eyeCenter.x, eyeCenter.y, {
     eyes,
-    vx: lastHeatVisionDirection.vx,
-    vy: lastHeatVisionDirection.vy,
+    vx: direction.vx,
+    vy: direction.vy,
     duration: 850,
   });
   showPowerStatus('SUPERMAN HEAT VISION', 'Heat vision fired. Open both eyes to re-arm.');

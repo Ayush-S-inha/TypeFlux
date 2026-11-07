@@ -1,12 +1,4 @@
 import { distance3D, handLandmarkSpace, jointAngleDegrees } from './landmark-geometry.js';
-import {
-  EYE_RELEASE_HOLD_MS,
-  EYE_SQUEEZE_ENTER_THRESHOLD,
-  EYE_SQUEEZE_EXIT_THRESHOLD,
-  EYE_SQUEEZE_SMOOTHING,
-  EYE_SQUINT_HOLD_MS,
-} from './config.js';
-
 const HAND_TRACKED = 'HAND TRACKED';
 
 const FINGER_JOINTS = {
@@ -57,54 +49,4 @@ export function classifyPowerGesture(landmarks, worldLandmarks, previousFingers 
   }
 
   return { gesture, fingers };
-}
-
-export function updateEyeSqueeze(state, leftScore, rightScore, now) {
-  const smoothing = EYE_SQUEEZE_SMOOTHING;
-  if (!state.initialized) {
-    state.left = leftScore;
-    state.right = rightScore;
-    state.initialized = true;
-  } else {
-    state.left += (leftScore - state.left) * smoothing;
-    state.right += (rightScore - state.right) * smoothing;
-  }
-
-  const rawOpen = leftScore <= EYE_SQUEEZE_EXIT_THRESHOLD
-    || rightScore <= EYE_SQUEEZE_EXIT_THRESHOLD;
-  const closed = state.squeezed
-    ? state.left > EYE_SQUEEZE_EXIT_THRESHOLD && state.right > EYE_SQUEEZE_EXIT_THRESHOLD
-    : state.left > EYE_SQUEEZE_ENTER_THRESHOLD && state.right > EYE_SQUEEZE_ENTER_THRESHOLD;
-
-  if (closed) {
-    if (state.squeezedSince === null) state.squeezedSince = now;
-    state.squeezed = true;
-    if (rawOpen) {
-      if (state.openSince === null) state.openSince = now;
-      return false;
-    }
-
-    state.openSince = null;
-    if (state.armed && now - state.squeezedSince >= EYE_SQUINT_HOLD_MS) {
-      state.armed = false;
-      return true;
-    }
-    return false;
-  }
-
-  state.squeezed = false;
-  state.squeezedSince = null;
-  if (state.openSince === null) state.openSince = now;
-  if (now - state.openSince >= EYE_RELEASE_HOLD_MS) state.armed = true;
-  return false;
-}
-
-export function resetEyeSqueeze(state) {
-  state.left = 0;
-  state.right = 0;
-  state.initialized = false;
-  state.squeezed = false;
-  state.squeezedSince = null;
-  state.openSince = null;
-  state.armed = true;
 }

@@ -15,6 +15,14 @@ import {
 } from './landmark-geometry.js';
 import { classifyPowerGesture } from './gesture-recognition.js';
 import { createGestureStateStore } from './gesture-state.js';
+import {
+  createIronManRepulsorEffects,
+  createSpiderManWebEffect,
+  distanceToEdge,
+  drawIronManRepulsor,
+  drawIronManRepulsorFlash,
+  drawSpiderManWeb,
+} from './hand-effects.js';
 
 const video = document.querySelector('#camera');
 const canvas = document.querySelector('#effects-canvas');
@@ -224,46 +232,18 @@ function screenPoint(landmark) {
   );
 }
 
-function addEffect(type, x, y, extra = {}) {
-  effects.push({ type, x, y, start: performance.now(), duration: 900, ...extra });
+function addEffect(effect) {
+  effects.push({ start: performance.now(), duration: 900, ...effect });
   if (effects.length > 36) effects.splice(0, effects.length - 36);
 }
 
 function fireGesture(gesture, points) {
-  const wrist = points[0];
-  const palm = [0, 5, 9, 13, 17].reduce((center, index) => ({
-    x: center.x + points[index].x / 5,
-    y: center.y + points[index].y / 5,
-  }), { x: 0, y: 0 });
-
   if (gesture === 'SPIDER-MAN WEB') {
-    const indexBase = points[5];
-    const indexTip = points[8];
-    const dx = indexTip.x - indexBase.x;
-    const dy = indexTip.y - indexBase.y;
-    const length = Math.max(1, Math.hypot(dx, dy));
-    const origin = {
-      x: wrist.x * 0.58 + palm.x * 0.42,
-      y: wrist.y * 0.58 + palm.y * 0.42,
-    };
-    addEffect('web', origin.x, origin.y, {
-      vx: dx / length,
-      vy: dy / length,
-      duration: 820,
-      flightRatio: 0.52,
-    });
+    const web = createSpiderManWebEffect(points);
+    if (web) addEffect(web);
     showPowerStatus('SPIDER-MAN WEB', 'Web fired. Return to a relaxed hand before firing again.');
   } else if (gesture === 'IRON MAN BLAST') {
-    const middleTip = points[12];
-    const dx = middleTip.x - wrist.x;
-    const dy = middleTip.y - wrist.y;
-    const length = Math.max(1, Math.hypot(dx, dy));
-    addEffect('repulsor', palm.x, palm.y, {
-      vx: dx / length,
-      vy: dy / length,
-      duration: 620,
-    });
-    addEffect('repulsor-flash', palm.x, palm.y, { duration: 260 });
+    for (const effect of createIronManRepulsorEffects(points)) addEffect(effect);
     showPowerStatus('IRON MAN REPULSOR', 'Blast fired. Return to a relaxed hand before firing again.');
   } else if (gesture === 'SUDARSHAN CHAKRA') {
     showPowerStatus('SUDARSHAN CHAKRA', 'Hold the index-only pose to keep the text chakra hovering at your fingertip.');
@@ -368,7 +348,10 @@ function fireSupermanLaser(face, eyePoints, direction) {
     y: (eyes[0].y + eyes[1].y) / 2,
   };
 
-  addEffect('laser-eyes', eyeCenter.x, eyeCenter.y, {
+  addEffect({
+    type: 'laser-eyes',
+    x: eyeCenter.x,
+    y: eyeCenter.y,
     eyes,
     vx: direction.vx,
     vy: direction.vy,
@@ -412,139 +395,6 @@ function drawHandGuides() {
   }
 }
 
-function distanceToEdge(x, y, vx, vy) {
-  const distances = [];
-  if (vx > 0.0001) distances.push((screenWidth - x) / vx);
-  else if (vx < -0.0001) distances.push(-x / vx);
-  if (vy > 0.0001) distances.push((screenHeight - y) / vy);
-  else if (vy < -0.0001) distances.push(-y / vy);
-
-  const validDistances = distances.filter((distance) => distance >= 0);
-  return validDistances.length
-    ? Math.min(...validDistances)
-    : Math.hypot(screenWidth, screenHeight);
-}
-
-function drawWeb(effect, progress) {
-  const flightRatio = effect.flightRatio || 0.52;
-  const flight = Math.min(1, progress / flightRatio);
-  const travel = 1 - Math.pow(1 - flight, 3);
-  const fade = progress <= flightRatio
-    ? 1
-    : Math.max(0, 1 - (progress - flightRatio) / (1 - flightRatio));
-  const reach = distanceToEdge(effect.x, effect.y, effect.vx, effect.vy);
-  const length = reach * travel;
-  if (length < 2 || fade <= 0) return;
-
-  const sideX = -effect.vy;
-  const sideY = effect.vx;
-  const segments = Math.max(4, Math.min(72, Math.ceil(length / 12)));
-  const strandPoint = (t) => {
-    const sway = Math.sin(t * Math.PI * 5) * 2.1 * Math.sin(t * Math.PI);
-    return {
-      x: effect.x + effect.vx * length * t + sideX * sway,
-      y: effect.y + effect.vy * length * t + sideY * sway,
-    };
-  };
-
-  ctx.save();
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
-
-  ctx.shadowColor = 'rgba(169, 225, 255, .85)';
-  ctx.shadowBlur = 11;
-  ctx.strokeStyle = `rgba(147, 211, 255, ${0.45 * fade})`;
-  ctx.lineWidth = 4.2;
-  ctx.beginPath();
-  ctx.moveTo(effect.x, effect.y);
-  for (let step = 1; step <= segments; step += 1) {
-    const point = strandPoint(step / segments);
-    ctx.lineTo(point.x, point.y);
-  }
-  ctx.stroke();
-
-  ctx.shadowBlur = 3;
-  for (const offset of [-1.1, 1.1]) {
-    ctx.beginPath();
-    for (let step = 0; step <= segments; step += 1) {
-      const t = step / segments;
-      const point = strandPoint(t);
-      const x = point.x + sideX * offset;
-      const y = point.y + sideY * offset;
-      if (step === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    }
-    ctx.strokeStyle = `rgba(245, 251, 255, ${0.9 * fade})`;
-    ctx.lineWidth = offset < 0 ? 1.25 : 0.8;
-    ctx.stroke();
-  }
-
-  const threadCount = Math.min(24, Math.floor(length / 27));
-  ctx.shadowBlur = 0;
-  ctx.strokeStyle = `rgba(195, 235, 255, ${0.72 * fade})`;
-  ctx.lineWidth = 0.75;
-  for (let index = 1; index <= threadCount; index += 1) {
-    const t = index / (threadCount + 1);
-    const point = strandPoint(t);
-    const spread = 2.5 + t * 2.8;
-    const tilt = index % 2 ? 1 : -1;
-    ctx.beginPath();
-    ctx.moveTo(point.x - sideX * spread, point.y - sideY * spread);
-    ctx.lineTo(point.x + sideX * spread + effect.vx * tilt * 2,
-      point.y + sideY * spread + effect.vy * tilt * 2);
-    ctx.stroke();
-  }
-
-  const head = strandPoint(1);
-  ctx.shadowColor = 'rgba(190, 238, 255, .95)';
-  ctx.shadowBlur = 14;
-  ctx.fillStyle = `rgba(255, 255, 255, ${0.95 * fade})`;
-  ctx.beginPath();
-  ctx.arc(head.x, head.y, 2.2 + (1 - travel) * 1.8, 0, Math.PI * 2);
-  ctx.fill();
-
-  ctx.shadowBlur = 8;
-  ctx.fillStyle = `rgba(227, 248, 255, ${0.8 * fade})`;
-  ctx.beginPath();
-  ctx.arc(effect.x, effect.y, 2.6, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
-}
-
-function drawRepulsor(effect, progress) {
-  const reach = 24 + progress * Math.hypot(screenWidth, screenHeight) * 0.8;
-  const endX = effect.x + effect.vx * reach;
-  const endY = effect.y + effect.vy * reach;
-  ctx.save();
-  ctx.lineCap = 'round';
-  const gradient = ctx.createLinearGradient(effect.x, effect.y, endX, endY);
-  gradient.addColorStop(0, `rgba(255, 255, 255, ${(1 - progress) * .98})`);
-  gradient.addColorStop(0.16, `rgba(112, 224, 255, ${(1 - progress) * .98})`);
-  gradient.addColorStop(1, 'rgba(92, 145, 255, 0)');
-  ctx.strokeStyle = gradient;
-  ctx.lineWidth = 9 * (1 - progress) + 1.5;
-  ctx.shadowColor = 'rgba(98, 210, 255, .98)';
-  ctx.shadowBlur = 20;
-  ctx.beginPath();
-  ctx.moveTo(effect.x, effect.y);
-  ctx.lineTo(endX, endY);
-  ctx.stroke();
-  ctx.restore();
-}
-
-function drawRepulsorFlash(effect, progress) {
-  const radius = 8 + progress * 24;
-  ctx.save();
-  const glow = ctx.createRadialGradient(effect.x, effect.y, 0, effect.x, effect.y, radius * 1.6);
-  glow.addColorStop(0, `rgba(255, 255, 255, ${(1 - progress) * 0.95})`);
-  glow.addColorStop(0.28, `rgba(140, 235, 255, ${(1 - progress) * 0.8})`);
-  glow.addColorStop(1, 'rgba(86, 155, 255, 0)');
-  ctx.fillStyle = glow;
-  ctx.beginPath();
-  ctx.arc(effect.x, effect.y, radius * 1.6, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
-}
 
 function drawTextEllipseRing(cx, cy, radiusX, radiusY, pattern, fontSize, color, startAngle = 0) {
   const characters = Array.from(pattern);
@@ -984,7 +834,7 @@ function drawLaserEyes(effect, progress) {
   ctx.lineCap = 'round';
 
   for (const eye of effect.eyes) {
-    const reach = distanceToEdge(eye.x, eye.y, vx, vy);
+    const reach = distanceToEdge(eye.x, eye.y, vx, vy, screenWidth, screenHeight);
     const endX = eye.x + vx * reach * eased;
     const endY = eye.y + vy * reach * eased;
 
@@ -1043,9 +893,12 @@ function drawEffects(now) {
       continue;
     }
 
-    if (effect.type === 'web') drawWeb(effect, progress);
-    else if (effect.type === 'repulsor') drawRepulsor(effect, progress);
-    else if (effect.type === 'repulsor-flash') drawRepulsorFlash(effect, progress);
+    if (effect.type === 'web') {
+      const reach = distanceToEdge(effect.x, effect.y, effect.vx, effect.vy, screenWidth, screenHeight);
+      drawSpiderManWeb(ctx, effect, progress, reach);
+    }
+    else if (effect.type === 'repulsor') drawIronManRepulsor(ctx, effect, progress, screenWidth, screenHeight);
+    else if (effect.type === 'repulsor-flash') drawIronManRepulsorFlash(ctx, effect, progress);
     else if (effect.type === 'laser-eyes') drawLaserEyes(effect, progress);
   }
 }

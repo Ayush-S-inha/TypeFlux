@@ -24,7 +24,7 @@
       <section class="welcome" id="welcome">
         <p class="eyebrow"><span></span> LIVE CAMERA / REAL-TIME TRACKING</p>
         <h1>Your hands.<br /><em>Your own effects.</em></h1>
-        <p class="welcome-copy">Spider-Man: extend your index and pinky. Iron Man: show an open palm. Point with your index finger for the Sudarshan Chakra. Turn the back of your hand toward the camera to reveal the Green Lantern ring. Superman: squint both eyes briefly for heat vision. Close your fist to surround your fist and forearm with Flash lightning.</p>
+        <p class="welcome-copy">Spider-Man: index + pinky. Iron Man: open palm. Flash: closed fist. Green Lantern: turn the back of your hand toward the camera. Sudarshan Chakra: index finger only. Superman: squeeze both eyes closed briefly.</p>
         <button class="primary-button" id="start-camera" type="button">
           Start camera <span aria-hidden="true">-></span>
         </button>
@@ -39,23 +39,25 @@
         <span id="gesture-detail">Raise a hand into view</span>
       </section>
 
-      <aside class="gesture-guide" id="gesture-guide" hidden aria-label="Available powers">
-        <span>SPIDER-MAN - WEB SHOOTER</span>
-        <span>IRON MAN - PALM BLAST</span>
-        <span>SUDARSHAN CHAKRA - INDEX POINTER</span>
-        <span>SUPERMAN - HEAT VISION</span>
-        <span>GREEN LANTERN - MIDDLE-FINGER RING</span>
-        <span>THE FLASH - FOREARM LIGHTNING</span>
+      <aside class="gesture-guide" id="gesture-guide" hidden aria-label="Gesture guide">
+        <ul class="power-list">
+          <li><span>SPIDER-MAN</span><span>INDEX + PINKY</span></li>
+          <li><span>IRON MAN</span><span>OPEN PALM</span></li>
+          <li><span>FLASH</span><span>CLOSED FIST</span></li>
+          <li><span>GREEN LANTERN</span><span>BACK OF HAND</span></li>
+          <li><span>SUDARSHAN CHAKRA</span><span>INDEX ONLY</span></li>
+          <li><span>SUPERMAN</span><span>TWO-EYE SQUEEZE</span></li>
+        </ul>
       </aside>
 
-      <footer class="bottom-bar">
+      <footer class="bottom-bar" aria-label="Camera controls">
         <div class="engine-state">
           <span id="engine-label">WAITING FOR CAMERA</span>
           <span class="separator">/</span>
           <span id="tracking-label">TRACKING OFF</span>
         </div>
         <div class="actions">
-          <button id="effects-toggle" type="button" aria-pressed="true" disabled>EFFECTS <span>ON</span></button>
+          <button id="effects-toggle" type="button" aria-label="Toggle visual effects" aria-pressed="true" disabled>EFFECTS <span>ON</span></button>
           <button id="pause-camera" type="button" disabled>PAUSE</button>
           <button id="restart-camera" type="button" disabled>RESTART</button>
         </div>

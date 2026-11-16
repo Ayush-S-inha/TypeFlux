@@ -67,6 +67,11 @@ test('Vite entry point and stylesheet remain connected to the application', asyn
   assert.match(mainSource, /^import '\.\/style\.css';/);
 });
 
+test('Green Lantern does not draw over a Spider-Man pose or candidate', async () => {
+  const mainSource = await readFile(path.join(sourceDir, 'main.js'), 'utf8');
+  assert.match(mainSource, /hand\.backOfHand && !hand\.spiderCandidate\s*&& hand\.gesture !== 'SPIDER-MAN WEB'/);
+});
+
 test('package metadata matches the lockfile and exposes test and build commands', async () => {
   const pkg = JSON.parse(await readFile(path.join(projectDir, 'package.json'), 'utf8'));
   const lock = JSON.parse(await readFile(path.join(projectDir, 'package-lock.json'), 'utf8'));

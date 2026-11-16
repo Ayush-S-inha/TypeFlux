@@ -8,7 +8,7 @@ const FINGER_JOINTS = {
   pinky: [17, 18, 19, 20],
 };
 
-function fingerShape(handPoints, joints, priorShape) {
+function fingerShape(handPoints, joints, priorShape, fingerName) {
   const [mcpIndex, pipIndex, dipIndex, tipIndex] = joints;
   const mcp = handPoints[mcpIndex];
   const pip = handPoints[pipIndex];
@@ -19,9 +19,10 @@ function fingerShape(handPoints, joints, priorShape) {
   const chainLength = distance3D(mcp, pip) + distance3D(pip, dip) + distance3D(dip, tip);
   const reach = chainLength ? distance3D(mcp, tip) / chainLength : 0;
   const straightness = Math.min(pipAngle, dipAngle);
+  const isPinky = fingerName === 'pinky';
   const extended = priorShape === 'extended'
-    ? straightness > 126 && reach > 0.66
-    : straightness > 140 && reach > 0.73;
+    ? straightness > (isPinky ? 120 : 126) && reach > (isPinky ? 0.62 : 0.66)
+    : straightness > (isPinky ? 132 : 140) && reach > (isPinky ? 0.68 : 0.73);
   const curled = priorShape === 'curled'
     ? straightness < 122 || reach < 0.73
     : straightness < 108 || reach < 0.65;
@@ -33,20 +34,22 @@ export function classifyPowerGesture(landmarks, worldLandmarks, previousFingers 
   const handPoints = handLandmarkSpace(landmarks, worldLandmarks, videoWidth, videoHeight);
   const fingers = {};
   for (const [name, joints] of Object.entries(FINGER_JOINTS)) {
-    fingers[name] = fingerShape(handPoints, joints, previousFingers[name]);
+    fingers[name] = fingerShape(handPoints, joints, previousFingers[name], name);
   }
 
   const extended = (name) => fingers[name] === 'extended';
   const curled = (name) => fingers[name] === 'curled';
+  const spiderCandidate = extended('index') && extended('pinky')
+    && !extended('middle') && !extended('ring');
   let gesture = HAND_TRACKED;
 
-  if (['index', 'middle', 'ring', 'pinky'].every(extended)) {
-    gesture = 'IRON MAN BLAST';
-  } else if (extended('index') && extended('pinky') && curled('middle') && curled('ring')) {
+  if (spiderCandidate) {
     gesture = 'SPIDER-MAN WEB';
+  } else if (['index', 'middle', 'ring', 'pinky'].every(extended)) {
+    gesture = 'IRON MAN BLAST';
   } else if (extended('index') && curled('middle') && curled('ring') && curled('pinky')) {
     gesture = 'SUDARSHAN CHAKRA';
   }
 
-  return { gesture, fingers };
+  return { gesture, fingers, spiderCandidate };
 }

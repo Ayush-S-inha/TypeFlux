@@ -89,6 +89,41 @@ test('power classifier recognizes Spider-Man, Iron Man, and Sudarshan Chakra pos
   }
 });
 
+test('Spider-Man accepts a slightly bent pinky and uncertain middle or ring fingers', () => {
+  const landmarks = createHandPose(['index', 'pinky']);
+  const setBentFinger = ([mcp, pip, dip, tip]) => {
+    const x = landmarks[mcp].x;
+    landmarks[pip] = { x, y: -0.2, z: 0 };
+    landmarks[dip] = { x: x + 0.1414, y: -0.3414, z: 0 };
+    landmarks[tip] = { x: x + 0.3414, y: -0.3414, z: 0 };
+  };
+
+  setBentFinger([17, 18, 19, 20]);
+  setBentFinger([9, 10, 11, 12]);
+  setBentFinger([13, 14, 15, 16]);
+
+  const powerGesture = classifyPowerGesture(landmarks, landmarks);
+  assert.equal(powerGesture.fingers.pinky, 'extended');
+  assert.equal(powerGesture.fingers.middle, 'bent');
+  assert.equal(powerGesture.fingers.ring, 'bent');
+  assert.equal(powerGesture.spiderCandidate, true);
+  assert.equal(powerGesture.gesture, 'SPIDER-MAN WEB');
+});
+
+test('Spider-Man priority does not steal a fully open palm or the index-only pose', () => {
+  const openPalm = classifyPowerGesture(
+    createHandPose(['index', 'middle', 'ring', 'pinky']),
+    createHandPose(['index', 'middle', 'ring', 'pinky']),
+  );
+  const indexOnlyLandmarks = createHandPose(['index']);
+  const indexOnly = classifyPowerGesture(indexOnlyLandmarks, indexOnlyLandmarks);
+
+  assert.equal(openPalm.gesture, 'IRON MAN BLAST');
+  assert.equal(openPalm.spiderCandidate, false);
+  assert.equal(indexOnly.gesture, 'SUDARSHAN CHAKRA');
+  assert.equal(indexOnly.spiderCandidate, false);
+});
+
 test('closed-fist detection rejects extended fingers and accepts a curled hand', () => {
   const openPalm = createHandPose(['index', 'middle', 'ring', 'pinky']);
   const closedFist = createHandPose();

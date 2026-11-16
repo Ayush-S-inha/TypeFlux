@@ -3,6 +3,7 @@ import {
   GESTURE_HOLD_MS,
   GESTURE_RELEASE_MS,
   HAND_LOST_RESET_MS,
+  SPIDER_MAN_SWITCH_MS,
 } from './config.js';
 
 const HAND_TRACKED = 'HAND TRACKED';
@@ -45,7 +46,10 @@ function settleGesture(previous, detectedGesture, now) {
     state.candidateSince = now;
   }
 
-  if (now - state.candidateSince < GESTURE_HOLD_MS || state.active === state.candidate) {
+  const holdMs = state.active === 'SPIDER-MAN WEB' && detectedGesture !== HAND_TRACKED
+    ? SPIDER_MAN_SWITCH_MS
+    : GESTURE_HOLD_MS;
+  if (now - state.candidateSince < holdMs || state.active === state.candidate) {
     return { state, gesture: state.active, entered: false };
   }
 

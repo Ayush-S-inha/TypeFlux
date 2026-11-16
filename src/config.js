@@ -19,6 +19,7 @@ export const EYE_SQUEEZE_EXIT_THRESHOLD = 0.29;
 export const EYE_SQUEEZE_SMOOTHING = 0.62;
 export const FACE_LOST_RESET_MS = 240;
 export const GESTURE_HOLD_MS = 120;
+export const SPIDER_MAN_SWITCH_MS = 280;
 export const GESTURE_GAP_MS = 125;
 export const GESTURE_RELEASE_MS = 170;
 export const HAND_LOST_RESET_MS = 450;

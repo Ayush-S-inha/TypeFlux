@@ -289,6 +289,7 @@ function updateHands(handDetection, now) {
       landmarks,
       points,
       gesture: settled.gesture,
+      spiderCandidate: powerGesture.spiderCandidate,
       backOfHand: isBackOfHandFacingCamera(
         landmarks,
         handedness,
@@ -453,7 +454,10 @@ function drawEffects(now) {
 
   drawHandGuides();
   for (const hand of hands) {
-    if (hand.backOfHand && hand.gesture !== 'FLASH LIGHTNING') drawGreenLanternRing(ctx, hand.points);
+    if (hand.backOfHand && !hand.spiderCandidate
+      && hand.gesture !== 'SPIDER-MAN WEB' && hand.gesture !== 'FLASH LIGHTNING') {
+      drawGreenLanternRing(ctx, hand.points);
+    }
     if (hand.gesture === 'FLASH LIGHTNING') drawFlashLightning(ctx, hand.points, now, hand.key);
     if (hand.gesture === 'SUDARSHAN CHAKRA') {
       chakraRadiusByHand.set(hand.key, drawSudarshanChakra(

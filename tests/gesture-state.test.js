@@ -5,6 +5,7 @@ import {
   GESTURE_HOLD_MS,
   GESTURE_RELEASE_MS,
   HAND_LOST_RESET_MS,
+  SPIDER_MAN_SWITCH_MS,
 } from '../src/config.js';
 import { createGestureStateStore } from '../src/gesture-state.js';
 
@@ -45,6 +46,58 @@ test('activates a pose after the configured hold time', () => {
   assert.equal(
     store.settle('Left', 'SPIDER-MAN WEB', fingerState, start + GESTURE_HOLD_MS + 1).entered,
     false,
+  );
+});
+
+test('keeps Spider-Man active through short competing pose reads', () => {
+  const store = createGestureStateStore();
+  const fingerState = fingerShapes('extended');
+  const start = 2500;
+  store.settle('Left', 'SPIDER-MAN WEB', fingerState, start);
+  assert.equal(store.settle('Left', 'SPIDER-MAN WEB', fingerState, start + GESTURE_HOLD_MS).entered, true);
+
+  const competingAt = start + GESTURE_HOLD_MS + 20;
+  assert.equal(store.settle('Left', 'IRON MAN BLAST', fingerState, competingAt).gesture, 'SPIDER-MAN WEB');
+  assert.equal(
+    store.settle('Left', 'IRON MAN BLAST', fingerState, competingAt + 140).gesture,
+    'SPIDER-MAN WEB',
+  );
+  assert.equal(
+    store.settle('Left', 'SPIDER-MAN WEB', fingerState, competingAt + 141).gesture,
+    'SPIDER-MAN WEB',
+  );
+});
+
+test('requires a sustained competing pose before leaving Spider-Man', () => {
+  const store = createGestureStateStore();
+  const fingerState = fingerShapes('extended');
+  const start = 3500;
+  store.settle('Left', 'SPIDER-MAN WEB', fingerState, start);
+  store.settle('Left', 'SPIDER-MAN WEB', fingerState, start + GESTURE_HOLD_MS);
+
+  const competingAt = start + GESTURE_HOLD_MS + 20;
+  store.settle('Left', 'IRON MAN BLAST', fingerState, competingAt);
+  assert.equal(
+    store.settle('Left', 'IRON MAN BLAST', fingerState, competingAt + SPIDER_MAN_SWITCH_MS - 1).gesture,
+    'SPIDER-MAN WEB',
+  );
+  assert.equal(
+    store.settle('Left', 'IRON MAN BLAST', fingerState, competingAt + SPIDER_MAN_SWITCH_MS).gesture,
+    'IRON MAN BLAST',
+  );
+});
+
+test('does not add Spider-Man switch delay to other powers', () => {
+  const store = createGestureStateStore();
+  const fingerState = fingerShapes('extended');
+  const start = 4500;
+  store.settle('Left', 'SUDARSHAN CHAKRA', fingerState, start);
+  store.settle('Left', 'SUDARSHAN CHAKRA', fingerState, start + GESTURE_HOLD_MS);
+  store.settle('Left', 'IRON MAN BLAST', fingerState, start + GESTURE_HOLD_MS + 1);
+
+  assert.equal(
+    store.settle('Left', 'IRON MAN BLAST', fingerState, start + GESTURE_HOLD_MS * 2 + 1).gesture,
+    'IRON MAN BLAST',
   );
 });
 

@@ -13,6 +13,7 @@ import {
   TRACKING_WASM,
 } from './config.js';
 import { distance2D } from './landmark-geometry.js';
+import { registerTracker } from './tracker-resources.js';
 
 function createEyeSqueezeState() {
   return {
@@ -139,15 +140,17 @@ export async function createFaceTracker() {
   };
 
   try {
-    return await FaceLandmarker.createFromOptions(vision, {
+    const tracker = await FaceLandmarker.createFromOptions(vision, {
       ...options,
       baseOptions: { modelAssetPath: FACE_MODEL, delegate: 'GPU' },
     });
+    return registerTracker(tracker);
   } catch {
-    return FaceLandmarker.createFromOptions(vision, {
+    const tracker = await FaceLandmarker.createFromOptions(vision, {
       ...options,
       baseOptions: { modelAssetPath: FACE_MODEL, delegate: 'CPU' },
     });
+    return registerTracker(tracker);
   }
 }
 

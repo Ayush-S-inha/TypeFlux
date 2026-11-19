@@ -6,6 +6,7 @@ import {
   TRACKING_MODULE,
   TRACKING_WASM,
 } from './config.js';
+import { registerTracker } from './tracker-resources.js';
 
 export async function createHandTracker() {
   const { FilesetResolver, HandLandmarker } = await import(/* @vite-ignore */ TRACKING_MODULE);
@@ -19,14 +20,16 @@ export async function createHandTracker() {
   };
 
   try {
-    return await HandLandmarker.createFromOptions(vision, {
+    const tracker = await HandLandmarker.createFromOptions(vision, {
       ...options,
       baseOptions: { modelAssetPath: HAND_MODEL, delegate: 'GPU' },
     });
+    return registerTracker(tracker);
   } catch {
-    return HandLandmarker.createFromOptions(vision, {
+    const tracker = await HandLandmarker.createFromOptions(vision, {
       ...options,
       baseOptions: { modelAssetPath: HAND_MODEL, delegate: 'CPU' },
     });
+    return registerTracker(tracker);
   }
 }

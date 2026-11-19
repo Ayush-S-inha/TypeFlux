@@ -40,6 +40,7 @@ test('openCamera requests a user-facing video stream and starts playback', async
     srcObject: null,
     played: false,
     async play() { this.played = true; },
+    pause() {},
   };
 
   await withNavigator({
@@ -59,10 +60,11 @@ test('openCamera requests a user-facing video stream and starts playback', async
   assert.equal(constraints.video.facingMode, 'user');
   assert.deepEqual(constraints.video.width, { ideal: 1280 });
   assert.deepEqual(constraints.video.height, { ideal: 720 });
+  closeCamera(video, stream);
 });
 
 test('openCamera reports unavailable browser camera access', async () => {
-  const video = { srcObject: null };
+  const video = { srcObject: null, pause() {} };
   await withNavigator({}, async () => {
     await assert.rejects(openCamera(video), /Camera access is not available/);
   });
@@ -75,6 +77,7 @@ test('openCamera stops every track when video playback rejects', async () => {
   const video = {
     srcObject: null,
     async play() { throw playbackError; },
+    pause() {},
   };
 
   await withNavigator({
@@ -87,28 +90,104 @@ test('openCamera stops every track when video playback rejects', async () => {
   assert.equal(video.srcObject, null);
 });
 
-test('setCameraPaused pauses and resumes the video element', async () => {
-  const calls = [];
-  const video = {
-    pause() { calls.push('pause'); },
-    async play() { calls.push('play'); },
-  };
-
-  await setCameraPaused(video, true);
-  await setCameraPaused(video, false);
-  assert.deepEqual(calls, ['pause', 'play']);
-});
-
-test('closeCamera stops tracks and clears the video source', () => {
+test('pausing stops camera tracks and clears the live video source', async () => {
   const { stream, stoppedTracks } = createCameraStream();
   const calls = [];
   const video = {
-    srcObject: stream,
+    srcObject: null,
+    async play() { calls.push('play'); },
     pause() { calls.push('pause'); },
   };
 
-  closeCamera(video, stream);
+  await withNavigator({
+    mediaDevices: { async getUserMedia() { return stream; } },
+  }, async () => {
+    await openCamera(video);
+    assert.equal(await setCameraPaused(video, true), null);
+  });
+
   assert.deepEqual(stoppedTracks, ['video', 'audio']);
-  assert.deepEqual(calls, ['pause']);
+  assert.equal(video.srcObject, null);
+  assert.deepEqual(calls, ['play', 'pause']);
+});
+
+test('resuming requests a fresh camera stream', async () => {
+  const first = createCameraStream();
+  const second = createCameraStream();
+  const streams = [first.stream, second.stream];
+  let requestCount = 0;
+  const video = {
+    srcObject: null,
+    async play() {},
+    pause() {},
+  };
+
+  await withNavigator({
+    mediaDevices: {
+      async getUserMedia() {
+        const stream = streams[requestCount];
+        requestCount += 1;
+        return stream;
+      },
+    },
+  }, async () => {
+    await openCamera(video);
+    await setCameraPaused(video, true);
+    const resumedStream = await setCameraPaused(video, false);
+    assert.equal(resumedStream, second.stream);
+  });
+
+  assert.equal(requestCount, 2);
+  assert.deepEqual(first.stoppedTracks, ['video', 'audio']);
+  assert.equal(video.srcObject, second.stream);
+});
+
+test('closeCamera stops both the supplied stream and the active stream', async () => {
+  const first = createCameraStream();
+  const second = createCameraStream();
+  const video = {
+    srcObject: null,
+    async play() {},
+    pause() {},
+  };
+
+  await withNavigator({
+    mediaDevices: {
+      async getUserMedia() { return second.stream; },
+    },
+  }, async () => {
+    await openCamera(video);
+    closeCamera(video, first.stream);
+  });
+
+  assert.deepEqual(first.stoppedTracks, ['video', 'audio']);
+  assert.deepEqual(second.stoppedTracks, ['video', 'audio']);
+  assert.equal(video.srcObject, null);
+});
+
+
+test('closeCamera cancels a pending camera request and stops its late stream', async () => {
+  const { stream, stoppedTracks } = createCameraStream();
+  let resolveStream;
+  const video = {
+    srcObject: null,
+    async play() {},
+    pause() {},
+  };
+
+  await withNavigator({
+    mediaDevices: {
+      getUserMedia() {
+        return new Promise((resolve) => { resolveStream = resolve; });
+      },
+    },
+  }, async () => {
+    const pendingRequest = openCamera(video);
+    closeCamera(video, null);
+    resolveStream(stream);
+    await assert.rejects(pendingRequest, (error) => error.name === 'AbortError');
+  });
+
+  assert.deepEqual(stoppedTracks, ['video', 'audio']);
   assert.equal(video.srcObject, null);
 });

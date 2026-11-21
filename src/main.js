@@ -52,6 +52,8 @@ let effectsEnabled = true;
 let trackerLoading = false;
 let faceTrackerLoading = false;
 let faceTrackingFailed = false;
+let cameraSessionId = 0;
+let cameraActionPending = false;
 let lastVideoTime = -1;
 let lastDetectionAt = 0;
 let lastFaceDetectionAt = 0;
@@ -93,12 +95,13 @@ function hideMessage() {
 }
 
 function updateTrackingLabel() {
+  if (!running) return;
   if (landmarker && faceLandmarker) trackingLabel.textContent = 'HAND + EYE TRACKING READY';
   else if (landmarker) trackingLabel.textContent = faceTrackerLoading ? 'LOADING EYE TRACKING' : (faceTrackingFailed ? 'HAND READY / EYE TRACKING OFF' : 'HAND TRACKING READY');
   else if (faceLandmarker) trackingLabel.textContent = 'EYE TRACKING READY';
 }
 
-async function loadFaceTracking() {
+async function loadFaceTracking(sessionId) {
   if (faceLandmarker) {
     updateTrackingLabel();
     return;
@@ -110,21 +113,27 @@ async function loadFaceTracking() {
   try {
     faceLandmarker = await createFaceTracker();
     faceTrackingFailed = false;
-    if (!running) return;
-    updateTrackingLabel();
-    gestureDetail.textContent = 'Spider-Man: index + pinky. Iron Man: open palm. Flash: close fist. Sudarshan Chakra: index only. Superman: squint both eyes.';
+    if (running && sessionId === cameraSessionId) {
+      updateTrackingLabel();
+      gestureDetail.textContent = 'Spider-Man: index + pinky. Iron Man: open palm. Flash: close fist. Sudarshan Chakra: index only. Superman: squint both eyes.';
+    }
   } catch (error) {
+    if (!running || sessionId !== cameraSessionId) return;
     console.error('TypeFlux could not start face tracking:', error);
     faceTrackingFailed = true;
     if (landmarker) trackingLabel.textContent = 'HAND READY / EYE TRACKING OFF';
     gestureDetail.textContent = 'Hand effects are ready. Eye tracking needs a connection and a restart.';
   } finally {
     faceTrackerLoading = false;
-    updateTrackingLabel();
+    if (running && sessionId !== cameraSessionId && !faceLandmarker) {
+      loadFaceTracking(cameraSessionId);
+    } else if (running) {
+      updateTrackingLabel();
+    }
   }
 }
 
-async function loadHandTracking() {
+async function loadHandTracking(sessionId) {
   if (landmarker) {
     updateTrackingLabel();
     return;
@@ -137,13 +146,15 @@ async function loadHandTracking() {
 
   try {
     landmarker = await createHandTracker();
-    if (!running) return;
-    updateTrackingLabel();
-    gestureName.textContent = 'SHOW A HAND';
-    gestureDetail.textContent = faceTrackingFailed
-      ? 'Close a fist for Flash lightning, or use Spider-Man, Iron Man, and Sudarshan Chakra. Superman eye tracking is unavailable.'
-      : 'Spider-Man: index + pinky. Iron Man: open palm. Flash: close fist. Sudarshan Chakra: index only. Superman: squint both eyes.';
+    if (running && sessionId === cameraSessionId) {
+      updateTrackingLabel();
+      gestureName.textContent = 'SHOW A HAND';
+      gestureDetail.textContent = faceTrackingFailed
+        ? 'Close a fist for Flash lightning, or use Spider-Man, Iron Man, and Sudarshan Chakra. Superman eye tracking is unavailable.'
+        : 'Spider-Man: index + pinky. Iron Man: open palm. Flash: close fist. Sudarshan Chakra: index only. Superman: squint both eyes.';
+    }
   } catch (error) {
+    if (!running || sessionId !== cameraSessionId) return;
     console.error('TypeFlux could not start hand tracking:', error);
     trackingLabel.textContent = 'HAND TRACKING UNAVAILABLE';
     gestureName.textContent = 'CAMERA IS READY';
@@ -151,20 +162,50 @@ async function loadHandTracking() {
     showMessage('The camera is running, but the hand-tracking model could not load. Check your internet connection and choose Restart.');
   } finally {
     trackerLoading = false;
+    if (running && sessionId !== cameraSessionId && !landmarker) {
+      loadHandTracking(cameraSessionId);
+    } else if (running) {
+      updateTrackingLabel();
+    }
+  }
+}
+
+function handleCameraTrackEnded(sessionId) {
+  if (!running || paused || sessionId !== cameraSessionId) return;
+  stopCamera();
+  showMessage('The camera connection ended. Check the camera and start TypeFlux again.');
+}
+
+function watchCameraTracks(stream, sessionId) {
+  const tracks = stream.getVideoTracks?.() || [];
+  for (const track of tracks) {
+    if (track.readyState === 'ended') {
+      handleCameraTrackEnded(sessionId);
+      return;
+    }
+    track.addEventListener?.('ended', () => handleCameraTrackEnded(sessionId), { once: true });
   }
 }
 
 async function startCamera() {
+  const sessionId = ++cameraSessionId;
   hideMessage();
   startButton.disabled = true;
+  startButton.setAttribute('aria-busy', 'true');
   startButton.textContent = 'Connecting...';
 
   try {
-    cameraStream = await openCamera(video);
+    const stream = await openCamera(video);
+    if (sessionId !== cameraSessionId) {
+      closeCamera(video, stream);
+      return;
+    }
+    cameraStream = stream;
     running = true;
     paused = false;
     lastVideoTime = -1;
     startButton.textContent = 'Start camera';
+    startButton.setAttribute('aria-busy', 'false');
     welcome.classList.add('dismissed');
     gestureReadout.hidden = false;
     gestureGuide.hidden = false;
@@ -172,6 +213,7 @@ async function startCamera() {
     restartButton.disabled = false;
     effectsButton.disabled = false;
     pauseButton.textContent = 'PAUSE';
+    pauseButton.setAttribute('aria-label', 'Pause camera');
     setStatus('CAMERA LIVE', true);
     engineLabel.textContent = 'CAMERA INPUT ACTIVE';
     trackingLabel.textContent = 'STARTING HAND + EYE TRACKING';
@@ -181,12 +223,16 @@ async function startCamera() {
     lastFaceDetectionAt = 0;
     lastDetectionAt = 0;
     faceTrackingFailed = false;
+    watchCameraTracks(cameraStream, sessionId);
+    if (!running || sessionId !== cameraSessionId) return;
     animationFrame = requestAnimationFrame(renderLoop);
-    loadHandTracking();
-    loadFaceTracking();
+    loadHandTracking(sessionId);
+    loadFaceTracking(sessionId);
   } catch (error) {
+    if (sessionId !== cameraSessionId) return;
     cameraStream = null;
     startButton.disabled = false;
+    startButton.setAttribute('aria-busy', 'false');
     startButton.textContent = 'Try again';
     showMessage(error.name === 'NotAllowedError'
       ? 'Camera permission was blocked. Allow camera access in Chrome settings, then try again.'
@@ -195,6 +241,8 @@ async function startCamera() {
 }
 
 function stopCamera() {
+  cameraSessionId += 1;
+  cameraActionPending = false;
   running = false;
   paused = false;
   cancelAnimationFrame(animationFrame);
@@ -213,11 +261,13 @@ function stopCamera() {
   gestureGuide.hidden = true;
   welcome.classList.remove('dismissed');
   startButton.disabled = false;
+  startButton.setAttribute('aria-busy', 'false');
   startButton.textContent = 'Start camera';
   pauseButton.disabled = true;
   restartButton.disabled = true;
   effectsButton.disabled = true;
   pauseButton.textContent = 'PAUSE';
+  pauseButton.setAttribute('aria-label', 'Pause camera');
   setStatus('CAMERA OFF');
   engineLabel.textContent = 'WAITING FOR CAMERA';
   trackingLabel.textContent = 'TRACKING OFF';
@@ -397,8 +447,6 @@ function drawHandGuides() {
   }
 }
 
-
-
 function drawLaserEyes(effect, progress) {
   const launch = Math.min(1, progress / 0.18);
   const eased = 1 - Math.pow(1 - launch, 3);
@@ -516,25 +564,40 @@ function renderLoop(now) {
 
 startButton.addEventListener('click', startCamera);
 pauseButton.addEventListener('click', async () => {
-  if (!running) return;
+  if (!running || cameraActionPending) return;
+  cameraActionPending = true;
+  const sessionId = cameraSessionId;
   const nextPaused = !paused;
+  pauseButton.disabled = true;
+  restartButton.disabled = true;
+
   try {
-    await setCameraPaused(video, nextPaused);
+    const stream = await setCameraPaused(video, nextPaused);
+    if (sessionId !== cameraSessionId || !running) return;
+    paused = nextPaused;
+    if (!paused) watchCameraTracks(stream, sessionId);
+    if (paused) {
+      pauseButton.textContent = 'RESUME';
+      pauseButton.setAttribute('aria-label', 'Resume camera');
+      engineLabel.textContent = 'CAMERA PAUSED';
+    } else {
+      pauseButton.textContent = 'PAUSE';
+      pauseButton.setAttribute('aria-label', 'Pause camera');
+      engineLabel.textContent = 'CAMERA INPUT ACTIVE';
+      lastVideoTime = -1;
+    }
   } catch (error) {
-    showMessage(error.message || 'Camera playback could not resume.');
-    return;
-  }
-  paused = nextPaused;
-  if (paused) {
-    pauseButton.textContent = 'RESUME';
-    engineLabel.textContent = 'CAMERA PAUSED';
-  } else {
-    pauseButton.textContent = 'PAUSE';
-    engineLabel.textContent = 'CAMERA INPUT ACTIVE';
-    lastVideoTime = -1;
+    if (sessionId === cameraSessionId) showMessage(error.message || 'Camera playback could not resume.');
+  } finally {
+    cameraActionPending = false;
+    if (running) {
+      pauseButton.disabled = false;
+      restartButton.disabled = false;
+    }
   }
 });
 restartButton.addEventListener('click', async () => {
+  if (cameraActionPending) return;
   stopCamera();
   await startCamera();
 });

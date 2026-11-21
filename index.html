@@ -25,10 +25,10 @@
         <p class="eyebrow"><span></span> LIVE CAMERA / REAL-TIME TRACKING</p>
         <h1>Your hands.<br /><em>Your own effects.</em></h1>
         <p class="welcome-copy">Spider-Man: index + pinky. Iron Man: open palm. Flash: closed fist. Green Lantern: turn the back of your hand toward the camera. Sudarshan Chakra: index finger only. Superman: squeeze both eyes closed briefly.</p>
-        <button class="primary-button" id="start-camera" type="button">
-          Start camera <span aria-hidden="true">-></span>
+        <button class="primary-button" id="start-camera" type="button" aria-describedby="privacy-note" aria-busy="false">
+          Start camera <span aria-hidden="true">-&gt;</span>
         </button>
-        <p class="privacy-note">Video is processed on this device. Tracking assets load from the web.</p>
+        <p class="privacy-note" id="privacy-note">Video is processed on this device. Tracking assets load from the web.</p>
       </section>
 
       <div class="message" id="message" role="status" hidden></div>
@@ -58,8 +58,8 @@
         </div>
         <div class="actions">
           <button id="effects-toggle" type="button" aria-label="Toggle visual effects" aria-pressed="true" disabled>EFFECTS <span>ON</span></button>
-          <button id="pause-camera" type="button" disabled>PAUSE</button>
-          <button id="restart-camera" type="button" disabled>RESTART</button>
+          <button id="pause-camera" type="button" aria-label="Pause camera" disabled>PAUSE</button>
+          <button id="restart-camera" type="button" aria-label="Restart camera" disabled>RESTART</button>
         </div>
       </footer>
     </main>

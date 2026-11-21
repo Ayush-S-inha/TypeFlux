@@ -1,55 +1,45 @@
 # TypeFlux
 
-TypeFlux is a browser-based camera project that reacts to hand gestures and facial movements. It uses MediaPipe to track the user's hands and face, then draws visual effects over the live camera feed.
+TypeFlux is a browser-based camera experience that turns hand poses and facial movements into live visual effects. MediaPipe tracks the hands and face, and the app draws each effect over the camera feed.
 
-The project currently includes Spider-Man, Iron Man, Superman, Green Lantern and Sudarshan Chakra.
+## Effects and gestures
 
-## Getting started
+| Effect | Trigger |
+| --- | --- |
+| Spider-Man web | Extend the index and pinky fingers |
+| Iron Man repulsor | Show an open palm |
+| Flash lightning | Close your fist |
+| Green Lantern ring | Turn the back of your hand toward the camera |
+| Sudarshan Chakra | Point with the index finger and fold the other fingers |
+| Superman heat vision | Squeeze both eyes briefly |
 
-Install the dependencies:
+The web and repulsor fire once per held pose. Return to a relaxed hand before firing again. The Green Lantern ring follows the middle finger. The Sudarshan Chakra stays above the index fingertip and rotates in place; it does not launch as a projectile. Flash lightning follows the fist and forearm. Superman's beams follow the gaze direction.
+
+## Run locally
+
+Use Node.js 20.19 or later, or Node.js 22.12 or later.
 
 ```bash
 npm install
-```
-
-Start the development server:
-
-```bash
 npm run dev
 ```
 
-Open the local URL printed by Vite and allow camera access.
+Open the local URL printed by Vite and allow camera access. Do not open `index.html` directly; the app uses Vite's module server.
 
-To create and preview a production build:
+Create and preview a production build with:
 
 ```bash
 npm run build
 npm run preview
 ```
 
-Do not open `index.html` directly in the browser. Run the project through Vite.
+Run the automated tests with:
 
-## Using TypeFlux
+```bash
+npm test
+```
 
-Start the camera to activate hand and face tracking. The available effects respond to these gestures:
-
-| Character | Gesture |
-| --- | --- |
-| Spider-Man | Extend your index and pinky fingers |
-| Iron Man | Show an open palm |
-| Superman | Squeeze both eyes briefly |
-| Green Lantern | Turn the back of your hand toward the camera |
-| Sudarshan Chakra | Point with your index finger while folding the other fingers |
-
-The Spider-Man web shoots from the hand. Iron Man fires an energy blast from the palm. Superman emits two heat-vision beams from the eyes.
-
-The Green Lantern ring appears on the middle finger. Sudarshan Chakra stays above the index fingertip and rotates as you move your hand.
-
-Use the controls at the bottom of the screen to pause the camera, restart tracking or switch the effects off.
-
-## Working with the source
-
-The project files are arranged as follows:
+## Source layout
 
 ```text
 TypeFlux/
@@ -57,24 +47,32 @@ TypeFlux/
   package.json
   package-lock.json
   src/
+    camera-runtime.js
+    config.js
+    face-tracking.js
+    flash-lightning.js
+    gesture-recognition.js
+    gesture-state.js
+    hand-artifacts.js
+    hand-effects.js
+    landmark-geometry.js
     main.js
     style.css
+    tracker-resources.js
+    tracking-runtime.js
+  tests/
 ```
 
-`index.html` contains the camera view and interface. Most of the application logic lives in `src/main.js`, including tracking, gesture recognition and effect rendering. Visual styling belongs in `src/style.css`.
+`src/main.js` coordinates the camera, tracking loops, gesture state and effect rendering. Camera acquisition and stream cleanup live in `camera-runtime.js`. Hand and face model setup live in `tracking-runtime.js` and `face-tracking.js`. Gesture classification, gesture settling and landmark projection are separate modules. Canvas rendering for the individual powers stays in the effect modules.
 
-Keep changes close to the feature being worked on. A new gesture should not break an existing one, and changes to camera coordinates must account for the mirrored video.
+## Camera and privacy
 
-## Camera and tracking
+Camera frames are processed in the browser. TypeFlux has no application backend and does not upload the camera feed. The MediaPipe JavaScript bundle, WASM files and model files load from external servers, so an internet connection is needed when those assets are not cached.
 
-TypeFlux uses MediaPipe Hand Landmarker and Face Landmarker. Their models and browser assets load from external servers, so an internet connection is required when the assets are not cached.
+The app requests video only; microphone access is disabled. Camera permission, lighting, hand position and face visibility affect tracking. Keep your hand inside the frame and keep both eyes visible when using Superman heat vision.
 
-The camera feed stays in the browser. No application backend is required.
+The camera controls can pause, resume, restart or disable the visual effects. If the browser or operating system ends the camera track, TypeFlux returns to the start screen and asks you to reconnect.
 
-Camera permission, lighting, hand position and face visibility affect tracking. Keep your hand inside the camera frame and avoid covering your fingers. For Superman, keep your face visible and both eyes unobstructed.
+## Testing notes
 
-## Development notes
-
-Test each effect separately after changing its code. Check that gestures trigger when expected, stop when released and can trigger again after returning to a neutral pose.
-
-A successful build does not confirm that a gesture works correctly on a webcam. Check the actual browser behavior before treating a change as finished.
+Automated tests cover camera stream cleanup, face and hand gesture state, landmark geometry, canvas effects, tracker disposal and interface structure. A passing test suite or production build does not verify real webcam tracking. Test each gesture in the browser after changing its thresholds, geometry or rendering.

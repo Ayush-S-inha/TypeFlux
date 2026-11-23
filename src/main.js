@@ -200,6 +200,14 @@ async function startCamera() {
       closeCamera(video, stream);
       return;
     }
+    if (document.hidden) {
+      closeCamera(video, stream);
+      startButton.disabled = false;
+      startButton.setAttribute('aria-busy', 'false');
+      startButton.textContent = 'Start camera';
+      showMessage('Camera start was cancelled because TypeFlux moved to the background. Return to this tab and try again.');
+      return;
+    }
     cameraStream = stream;
     running = true;
     paused = false;
@@ -241,6 +249,7 @@ async function startCamera() {
 }
 
 function stopCamera() {
+  hideMessage();
   cameraSessionId += 1;
   cameraActionPending = false;
   running = false;
@@ -532,38 +541,38 @@ function drawEffects(now) {
 }
 
 function renderLoop(now) {
-  if (!running) return;
-  if (!paused) {
-    if (landmarker && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
-      && video.currentTime !== lastVideoTime && now - lastDetectionAt >= FRAME_INTERVAL) {
-      try {
-        const handDetection = landmarker.detectForVideo(video, now);
-        updateHands(handDetection, now);
-        lastVideoTime = video.currentTime;
-        lastDetectionAt = now;
-      } catch (error) {
-        console.error('Hand tracking frame failed:', error);
-        trackingLabel.textContent = 'HAND TRACKING RETRYING';
-      }
-    }
-    if (faceLandmarker && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
-      && now - lastFaceDetectionAt >= FACE_FRAME_INTERVAL) {
-      try {
-        const faceResult = faceLandmarker.detectForVideo(video, now);
-        updateFaceTracking(faceResult, now);
-        lastFaceDetectionAt = now;
-      } catch (error) {
-        console.error('Face tracking frame failed:', error);
-        if (landmarker) trackingLabel.textContent = 'EYE TRACKING RETRYING';
-      }
-    }
-    drawEffects(now);
+  if (!running || paused) {
+    animationFrame = 0;
+    return;
   }
+  if (landmarker && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+    && video.currentTime !== lastVideoTime && now - lastDetectionAt >= FRAME_INTERVAL) {
+    try {
+      const handDetection = landmarker.detectForVideo(video, now);
+      updateHands(handDetection, now);
+      lastVideoTime = video.currentTime;
+      lastDetectionAt = now;
+    } catch (error) {
+      console.error('Hand tracking frame failed:', error);
+      trackingLabel.textContent = 'HAND TRACKING RETRYING';
+    }
+  }
+  if (faceLandmarker && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+    && now - lastFaceDetectionAt >= FACE_FRAME_INTERVAL) {
+    try {
+      const faceResult = faceLandmarker.detectForVideo(video, now);
+      updateFaceTracking(faceResult, now);
+      lastFaceDetectionAt = now;
+    } catch (error) {
+      console.error('Face tracking frame failed:', error);
+      if (landmarker) trackingLabel.textContent = 'EYE TRACKING RETRYING';
+    }
+  }
+  drawEffects(now);
   animationFrame = requestAnimationFrame(renderLoop);
 }
 
-startButton.addEventListener('click', startCamera);
-pauseButton.addEventListener('click', async () => {
+async function toggleCameraPause(automatic = false) {
   if (!running || cameraActionPending) return;
   cameraActionPending = true;
   const sessionId = cameraSessionId;
@@ -575,19 +584,31 @@ pauseButton.addEventListener('click', async () => {
     const stream = await setCameraPaused(video, nextPaused);
     if (sessionId !== cameraSessionId || !running) return;
     paused = nextPaused;
-    if (!paused) watchCameraTracks(stream, sessionId);
     if (paused) {
+      cancelAnimationFrame(animationFrame);
+      animationFrame = 0;
+      cameraStream = null;
       pauseButton.textContent = 'RESUME';
       pauseButton.setAttribute('aria-label', 'Resume camera');
+      setStatus('CAMERA PAUSED');
       engineLabel.textContent = 'CAMERA PAUSED';
+      if (automatic) showMessage('Camera paused because TypeFlux moved to the background. Select Resume when you return.');
     } else {
+      cameraStream = stream;
+      watchCameraTracks(stream, sessionId);
       pauseButton.textContent = 'PAUSE';
       pauseButton.setAttribute('aria-label', 'Pause camera');
+      setStatus('CAMERA LIVE', true);
       engineLabel.textContent = 'CAMERA INPUT ACTIVE';
       lastVideoTime = -1;
+      lastFaceDetectionAt = 0;
+      animationFrame = requestAnimationFrame(renderLoop);
+      if (automatic) hideMessage();
     }
   } catch (error) {
-    if (sessionId === cameraSessionId) showMessage(error.message || 'Camera playback could not resume.');
+    if (sessionId === cameraSessionId && error.name !== 'AbortError') {
+      showMessage(error.message || 'Camera playback could not resume.');
+    }
   } finally {
     cameraActionPending = false;
     if (running) {
@@ -595,7 +616,10 @@ pauseButton.addEventListener('click', async () => {
       restartButton.disabled = false;
     }
   }
-});
+}
+
+startButton.addEventListener('click', startCamera);
+pauseButton.addEventListener('click', () => toggleCameraPause());
 restartButton.addEventListener('click', async () => {
   if (cameraActionPending) return;
   stopCamera();
@@ -607,7 +631,18 @@ effectsButton.addEventListener('click', () => {
   effectsButton.querySelector('span').textContent = effectsEnabled ? 'ON' : 'OFF';
   if (!effectsEnabled) ctx.clearRect(0, 0, screenWidth, screenHeight);
 });
+function handlePageVisibilityChange() {
+  if (!document.hidden || !running) return;
+  if (cameraActionPending) {
+    if (paused) closeCamera(video, cameraStream);
+    return;
+  }
+  if (!paused) void toggleCameraPause(true);
+}
+
 window.addEventListener('resize', resizeCanvas);
 window.addEventListener('beforeunload', stopCamera);
+window.addEventListener('pagehide', stopCamera);
+document.addEventListener('visibilitychange', handlePageVisibilityChange);
 
 resizeCanvas();

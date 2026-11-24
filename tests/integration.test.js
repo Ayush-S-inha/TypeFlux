@@ -87,3 +87,16 @@ test('package metadata matches the lockfile and exposes test and build commands'
   assert.equal(pkg.scripts.build, 'vite build');
   assert.equal(pkg.engines.node, '^20.19.0 || >=22.12.0');
 });
+
+test('page lifecycle handlers stay inside the existing main module', async () => {
+  const mainSource = await readFile(path.join(sourceDir, 'main.js'), 'utf8');
+  assert.doesNotMatch(mainSource, /page-lifecycle\.js/);
+  assert.match(mainSource, /document\.addEventListener\('visibilitychange', handlePageVisibilityChange\)/);
+  assert.match(mainSource, /window\.addEventListener\('pagehide', stopCamera\)/);
+  assert.match(mainSource, /function handlePageVisibilityChange\(\)\s*\{[\s\S]*?if \(!document\.hidden \|\| !running\) return;[\s\S]*?void toggleCameraPause\(true\)/);
+  assert.match(mainSource, /setStatus\('CAMERA PAUSED'\)/);
+  assert.match(mainSource, /setStatus\('CAMERA LIVE', true\)/);
+  assert.match(mainSource, /cameraStream = stream;\s*watchCameraTracks\(stream, sessionId\)/);
+  assert.match(mainSource, /if \(document\.hidden\)\s*\{\s*closeCamera\(video, stream\)/);
+  assert.match(mainSource, /if \(!running \|\| paused\)\s*\{\s*animationFrame = 0;\s*return;/);
+});

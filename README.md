@@ -63,7 +63,7 @@ TypeFlux/
   tests/
 ```
 
-`src/main.js` coordinates the camera, tracking loops, gesture state and effect rendering. Camera acquisition and stream cleanup live in `camera-runtime.js`. Hand and face model setup live in `tracking-runtime.js` and `face-tracking.js`. Gesture classification, gesture settling and landmark projection are separate modules. Canvas rendering for the individual powers stays in the effect modules.
+`src/main.js` coordinates the camera, tracking loops, gesture state, effect rendering and browser page-lifecycle events. Camera acquisition and stream cleanup live in `camera-runtime.js`. Hand and face model setup live in `tracking-runtime.js` and `face-tracking.js`. Gesture classification, gesture settling and landmark projection are separate modules. Canvas rendering for the individual powers stays in the effect modules.
 
 ## Camera and privacy
 
@@ -71,8 +71,8 @@ Camera frames are processed in the browser. TypeFlux has no application backend 
 
 The app requests video only; microphone access is disabled. Camera permission, lighting, hand position and face visibility affect tracking. Keep your hand inside the frame and keep both eyes visible when using Superman heat vision.
 
-The camera controls can pause, resume, restart or disable the visual effects. If the browser or operating system ends the camera track, TypeFlux returns to the start screen and asks you to reconnect.
+The camera controls can pause, resume, restart or disable the visual effects. When TypeFlux moves into a background tab, it stops camera capture and stays paused until you select Resume. Leaving or navigating away from the page also closes the active camera stream. If the browser or operating system ends the camera track, TypeFlux returns to the start screen and asks you to reconnect.
 
 ## Testing notes
 
-Automated tests cover camera stream cleanup, face and hand gesture state, landmark geometry, canvas effects, tracker disposal and interface structure. A passing test suite or production build does not verify real webcam tracking. Test each gesture in the browser after changing its thresholds, geometry or rendering.
+Automated tests cover camera stream cleanup, face and hand gesture state, landmark geometry, canvas effects, tracker disposal, page-lifecycle wiring and interface structure. A passing test suite or production build does not verify real webcam tracking. Test each gesture in the browser after changing its thresholds, geometry or rendering.
